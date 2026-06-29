@@ -1,14 +1,4 @@
-print([[
-███████╗██████╗     ██╗  ██╗██╗   ██╗██████╗ 
-██╔════╝██╔══██╗    ██║  ██║██║   ██║██╔══██╗
-███████╗██████╔╝    ███████║██║   ██║██████╔╝
-╚════██║██╔═══╝     ██╔══██║██║   ██║██╔══██╗
-███████║██║         ██║  ██║╚██████╔╝██████╔╝
-╚══════╝╚═╝         ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ 
-]])
 
--- Полностью деобфусцированный скрипт
--- Все премиум-функции разблокированы
 
 local function create_rng()
     local state = 0
@@ -62,9 +52,6 @@ local function decode_string(encoded_str, key)
     key = key - 145884
     key = key - 1087546
     
-    local rng_state = key % 35184372088832
-    local rng_mul = key % 255 + 2
-    
     local shift = 229
     
     for i = 1, #encoded_str do
@@ -75,12 +62,9 @@ local function decode_string(encoded_str, key)
     return result
 end
 
--- Основные функции скрипта
 local function setup_environment()
     local env = getfenv and getfenv() or _ENV
-    local unpack_func = unpack or table.unpack
     
-    -- Расшифровка всех строк
     local str = {
         loadstring = decode_string("\024y\014\145q\143\178\021\168\216\162\203", 172892653616),
         string = decode_string("\017c\"\1950\169\138\023\177\215\209F\182\012\157\024E\182\024\227\217\215\000m\162\181\129tvY\185\157\2082\150M", 6238278665001),
@@ -138,373 +122,393 @@ local function setup_environment()
     return str
 end
 
--- Главная логика скрипта
+-- Функция для загрузки скрипта из интернета
+local function load_script_from_url(url)
+    local success, result = pcall(function()
+        return game:HttpGet(url)
+    end)
+    
+    if success then
+        return result
+    else
+        return nil, result
+    end
+end
+
+-- Функция для выполнения Lua кода
+local function execute_lua(code)
+    if not code or code == "" then
+        return false, "Код пуст"
+    end
+    
+    local func, err = loadstring(code)
+    if func then
+        local success, result = pcall(func)
+        if success then
+            return true, result
+        else
+            return false, result
+        end
+    else
+        return false, err
+    end
+end
+
+-- Главный скрипт с GUI
 local function main_script()
     local strings = setup_environment()
     local env = getfenv and getfenv() or _ENV
     
-    -- Функции для работы с памятью
-    local function memory_read(address, size)
-        -- Чтение памяти (все премиум-функции разблокированы)
-        return nil
+    -- Создание GUI
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "ScriptHub"
+    gui.ResetOnSpawn = false
+    
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 700, 0, 550)
+    frame.Position = UDim2.new(0.5, -350, 0.5, -275)
+    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    frame.BackgroundTransparency = 0.05
+    frame.BorderSizePixel = 0
+    
+    -- Заголовок
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 50)
+    title.Position = UDim2.new(0, 0, 0, 0)
+    title.Text = "🟢 Script Hub - Все функции разблокированы"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.SourceSansBold
+    title.TextSize = 22
+    
+    -- Кнопка закрытия
+    local close_btn = Instance.new("TextButton")
+    close_btn.Size = UDim2.new(0, 35, 0, 35)
+    close_btn.Position = UDim2.new(1, -40, 0, 8)
+    close_btn.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+    close_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    close_btn.Text = "X"
+    close_btn.Font = Enum.Font.SourceSansBold
+    close_btn.TextSize = 20
+    close_btn.BorderSizePixel = 0
+    
+    close_btn.MouseButton1Click:Connect(function()
+        gui:Destroy()
+    end)
+    
+    -- Вкладки
+    local tab_frame = Instance.new("Frame")
+    tab_frame.Size = UDim2.new(1, 0, 0, 40)
+    tab_frame.Position = UDim2.new(0, 0, 0, 50)
+    tab_frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    tab_frame.BackgroundTransparency = 0.3
+    tab_frame.BorderSizePixel = 0
+    
+    local tab_names = {"📝 Выполнение", "🌐 Загрузка", "💾 Память", "⚙️ Настройки"}
+    local tab_buttons = {}
+    local tab_containers = {}
+    local current_tab = 1
+    
+    for i, name in ipairs(tab_names) do
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(0.25, 0, 1, 0)
+        btn.Position = UDim2.new((i-1) * 0.25, 0, 0, 0)
+        btn.BackgroundColor3 = (i == 1) and Color3.fromRGB(70, 70, 70) or Color3.fromRGB(50, 50, 50)
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.Text = name
+        btn.Font = Enum.Font.SourceSansBold
+        btn.TextSize = 16
+        btn.BorderSizePixel = 0
+        
+        btn.MouseButton1Click:Connect(function()
+            current_tab = i
+            for j, b in ipairs(tab_buttons) do
+                b.BackgroundColor3 = (j == i) and Color3.fromRGB(70, 70, 70) or Color3.fromRGB(50, 50, 50)
+            end
+            for j, container in ipairs(tab_containers) do
+                container.Visible = (j == i)
+            end
+        end)
+        
+        btn.Parent = tab_frame
+        tab_buttons[i] = btn
     end
     
-    local function memory_write(address, data)
-        -- Запись в память
-        return nil
-    end
+    -- ВКЛАДКА 1: Выполнение кода
+    local execute_tab = Instance.new("Frame")
+    execute_tab.Size = UDim2.new(1, 0, 1, -90)
+    execute_tab.Position = UDim2.new(0, 0, 0, 90)
+    execute_tab.BackgroundTransparency = 1
+    execute_tab.Visible = true
     
-    -- Функции для работы с процессами
-    local function get_process_list()
-        -- Получение списка процессов
-        return {}
-    end
+    local code_box = Instance.new("TextBox")
+    code_box.Size = UDim2.new(0.92, 0, 0, 320)
+    code_box.Position = UDim2.new(0.04, 0, 0, 0)
+    code_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    code_box.TextColor3 = Color3.fromRGB(255, 255, 255)
+    code_box.PlaceholderText = "Введите Lua код здесь..."
+    code_box.TextWrapped = true
+    code_box.MultiLine = true
+    code_box.Font = Enum.Font.SourceSans
+    code_box.TextSize = 14
+    code_box.ClearTextOnFocus = false
+    code_box.Text = "-- Пример:\nprint('Hello World!')\n\n-- Загрузка скрипта из интернета:\n-- loadstring(game:HttpGet('https://example.com/script.lua'))()"
     
-    local function attach_to_process(pid)
-        -- Подключение к процессу
-        return true
-    end
+    local output_box = Instance.new("TextBox")
+    output_box.Size = UDim2.new(0.92, 0, 0, 120)
+    output_box.Position = UDim2.new(0.04, 0, 0.76, 0)
+    output_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    output_box.TextColor3 = Color3.fromRGB(200, 200, 200)
+    output_box.PlaceholderText = "📋 Вывод..."
+    output_box.TextWrapped = true
+    output_box.MultiLine = true
+    output_box.ReadOnly = true
+    output_box.Font = Enum.Font.SourceSans
+    output_box.TextSize = 12
+    output_box.ClearTextOnFocus = false
     
-    -- Функции для работы с Lua
-    local function execute_lua(code)
-        local func, err = loadstring(code)
-        if func then
-            local success, result = pcall(func)
+    local execute_btn = Instance.new("TextButton")
+    execute_btn.Size = UDim2.new(0.15, 0, 0, 35)
+    execute_btn.Position = UDim2.new(0.04, 0, 0.7, 0)
+    execute_btn.BackgroundColor3 = Color3.fromRGB(0, 180, 0)
+    execute_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    execute_btn.Text = "▶ Выполнить"
+    execute_btn.Font = Enum.Font.SourceSansBold
+    execute_btn.TextSize = 16
+    execute_btn.BorderSizePixel = 0
+    
+    local clear_btn = Instance.new("TextButton")
+    clear_btn.Size = UDim2.new(0.12, 0, 0, 35)
+    clear_btn.Position = UDim2.new(0.2, 0, 0.7, 0)
+    clear_btn.BackgroundColor3 = Color3.fromRGB(180, 0, 0)
+    clear_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    clear_btn.Text = "🗑 Очистить"
+    clear_btn.Font = Enum.Font.SourceSansBold
+    clear_btn.TextSize = 16
+    clear_btn.BorderSizePixel = 0
+    
+    execute_btn.MouseButton1Click:Connect(function()
+        local code = code_box.Text
+        if code and code ~= "" then
+            output_box.Text = "⏳ Выполнение..."
+            local success, result = execute_lua(code)
             if success then
-                return true, result
+                output_box.Text = "✅ Выполнение успешно!"
+                if result then
+                    output_box.Text = output_box.Text .. "\n📊 Результат: " .. tostring(result)
+                end
             else
-                return false, result
+                output_box.Text = "❌ Ошибка: " .. tostring(result)
             end
         else
-            return false, err
+            output_box.Text = "⚠️ Введите код для выполнения"
         end
-    end
+    end)
     
-    -- Функции для работы с GUI
-    local function create_gui()
-        local gui = Instance.new("ScreenGui")
-        gui.Name = "MainGUI"
-        gui.ResetOnSpawn = false
-        
-        local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0, 600, 0, 500)
-        frame.Position = UDim2.new(0.5, -300, 0.5, -250)
-        frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-        frame.BackgroundTransparency = 0.1
-        frame.BorderSizePixel = 0
-        
-        local title = Instance.new("TextLabel")
-        title.Size = UDim2.new(1, 0, 0, 50)
-        title.Position = UDim2.new(0, 0, 0, 0)
-        title.Text = "Script Hub - Premium Unlocked"
-        title.TextColor3 = Color3.fromRGB(255, 255, 255)
-        title.BackgroundTransparency = 1
-        title.Font = Enum.Font.SourceSansBold
-        title.TextSize = 26
-        
-        local tabs = {}
-        local current_tab = 1
-        
-        -- Вкладки
-        local tab_frame = Instance.new("Frame")
-        tab_frame.Size = UDim2.new(1, 0, 0, 40)
-        tab_frame.Position = UDim2.new(0, 0, 0, 50)
-        tab_frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-        tab_frame.BackgroundTransparency = 0.5
-        tab_frame.BorderSizePixel = 0
-        
-        -- Кнопки вкладок
-        local tab_names = {"Execute", "Memory", "Processes", "Settings"}
-        local tab_buttons = {}
-        
-        for i, name in ipairs(tab_names) do
-            local btn = Instance.new("TextButton")
-            btn.Size = UDim2.new(0.25, 0, 1, 0)
-            btn.Position = UDim2.new((i-1) * 0.25, 0, 0, 0)
-            btn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-            btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-            btn.Text = name
-            btn.Font = Enum.Font.SourceSansBold
-            btn.TextSize = 16
-            btn.BorderSizePixel = 0
+    clear_btn.MouseButton1Click:Connect(function()
+        code_box.Text = ""
+        output_box.Text = ""
+    end)
+    
+    -- ВКЛАДКА 2: Загрузка скриптов из интернета
+    local load_tab = Instance.new("Frame")
+    load_tab.Size = UDim2.new(1, 0, 1, -90)
+    load_tab.Position = UDim2.new(0, 0, 0, 90)
+    load_tab.BackgroundTransparency = 1
+    load_tab.Visible = false
+    
+    local url_box = Instance.new("TextBox")
+    url_box.Size = UDim2.new(0.7, 0, 0, 35)
+    url_box.Position = UDim2.new(0.04, 0, 0, 0)
+    url_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    url_box.TextColor3 = Color3.fromRGB(255, 255, 255)
+    url_box.PlaceholderText = "🌐 Введите URL скрипта..."
+    url_box.Font = Enum.Font.SourceSans
+    url_box.TextSize = 14
+    url_box.ClearTextOnFocus = false
+    url_box.Text = "https://raw.githubusercontent.com/OBSIGE/fgswfgs/refs/heads/main"
+    
+    local load_btn = Instance.new("TextButton")
+    load_btn.Size = UDim2.new(0.15, 0, 0, 35)
+    load_btn.Position = UDim2.new(0.75, 0, 0, 0)
+    load_btn.BackgroundColor3 = Color3.fromRGB(0, 150, 200)
+    load_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    load_btn.Text = "📥 Загрузить"
+    load_btn.Font = Enum.Font.SourceSansBold
+    load_btn.TextSize = 16
+    load_btn.BorderSizePixel = 0
+    
+    local load_output = Instance.new("TextBox")
+    load_output.Size = UDim2.new(0.92, 0, 0, 250)
+    load_output.Position = UDim2.new(0.04, 0, 0.1, 0)
+    load_output.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    load_output.TextColor3 = Color3.fromRGB(200, 200, 200)
+    load_output.PlaceholderText = "📋 Результат загрузки..."
+    load_output.TextWrapped = true
+    load_output.MultiLine = true
+    load_output.ReadOnly = true
+    load_output.Font = Enum.Font.SourceSans
+    load_output.TextSize = 12
+    load_output.ClearTextOnFocus = false
+    
+    local load_execute_btn = Instance.new("TextButton")
+    load_execute_btn.Size = UDim2.new(0.15, 0, 0, 35)
+    load_execute_btn.Position = UDim2.new(0.04, 0, 0.6, 0)
+    load_execute_btn.BackgroundColor3 = Color3.fromRGB(0, 180, 0)
+    load_execute_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    load_execute_btn.Text = "▶ Выполнить"
+    load_execute_btn.Font = Enum.Font.SourceSansBold
+    load_execute_btn.TextSize = 16
+    load_execute_btn.BorderSizePixel = 0
+    load_execute_btn.Visible = false
+    
+    local loaded_code = ""
+    
+    load_btn.MouseButton1Click:Connect(function()
+        local url = url_box.Text
+        if url and url ~= "" then
+            load_output.Text = "⏳ Загрузка скрипта из: " .. url
             
-            btn.MouseButton1Click:Connect(function()
-                current_tab = i
-                for j, b in ipairs(tab_buttons) do
-                    b.BackgroundColor3 = (j == i) and Color3.fromRGB(70, 70, 70) or Color3.fromRGB(50, 50, 50)
-                end
-                for j, container in ipairs(tab_containers) do
-                    container.Visible = (j == i)
-                end
+            local success, result = pcall(function()
+                return game:HttpGet(url)
             end)
             
-            btn.Parent = tab_frame
-            tab_buttons[i] = btn
+            if success and result then
+                loaded_code = result
+                load_output.Text = "✅ Скрипт загружен успешно!\n📊 Размер: " .. string.len(result) .. " байт\n\n" .. string.sub(result, 1, 200) .. "..."
+                load_execute_btn.Visible = true
+            else
+                load_output.Text = "❌ Ошибка загрузки: " .. tostring(result or "Неизвестная ошибка")
+                load_execute_btn.Visible = false
+            end
+        else
+            load_output.Text = "⚠️ Введите URL скрипта"
         end
-        
-        -- Контейнеры вкладок
-        local tab_containers = {}
-        
-        -- Вкладка 1: Выполнение кода
-        local execute_tab = Instance.new("Frame")
-        execute_tab.Size = UDim2.new(1, 0, 1, -90)
-        execute_tab.Position = UDim2.new(0, 0, 0, 90)
-        execute_tab.BackgroundTransparency = 1
-        execute_tab.Visible = true
-        
-        local code_box = Instance.new("TextBox")
-        code_box.Size = UDim2.new(0.9, 0, 0, 300)
-        code_box.Position = UDim2.new(0.05, 0, 0, 0)
-        code_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        code_box.TextColor3 = Color3.fromRGB(255, 255, 255)
-        code_box.PlaceholderText = "Введите Lua код здесь..."
-        code_box.TextWrapped = true
-        code_box.MultiLine = true
-        code_box.Font = Enum.Font.SourceSans
-        code_box.TextSize = 14
-        code_box.ClearTextOnFocus = false
-        
-        local output_box = Instance.new("TextBox")
-        output_box.Size = UDim2.new(0.9, 0, 0, 100)
-        output_box.Position = UDim2.new(0.05, 0, 0.7, 0)
-        output_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        output_box.TextColor3 = Color3.fromRGB(200, 200, 200)
-        output_box.PlaceholderText = "Вывод..."
-        output_box.TextWrapped = true
-        output_box.MultiLine = true
-        output_box.ReadOnly = true
-        output_box.Font = Enum.Font.SourceSans
-        output_box.TextSize = 12
-        output_box.ClearTextOnFocus = false
-        
-        local execute_btn = Instance.new("TextButton")
-        execute_btn.Size = UDim2.new(0.2, 0, 0, 35)
-        execute_btn.Position = UDim2.new(0.05, 0, 0.62, 0)
-        execute_btn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
-        execute_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        execute_btn.Text = "Выполнить"
-        execute_btn.Font = Enum.Font.SourceSansBold
-        execute_btn.TextSize = 16
-        
-        local clear_btn = Instance.new("TextButton")
-        clear_btn.Size = UDim2.new(0.2, 0, 0, 35)
-        clear_btn.Position = UDim2.new(0.28, 0, 0.62, 0)
-        clear_btn.BackgroundColor3 = Color3.fromRGB(150, 0, 0)
-        clear_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        clear_btn.Text = "Очистить"
-        clear_btn.Font = Enum.Font.SourceSansBold
-        clear_btn.TextSize = 16
-        
-        execute_btn.MouseButton1Click:Connect(function()
-            local code = code_box.Text
-            if code and code ~= "" then
-                local success, result = execute_lua(code)
-                if success then
-                    output_box.Text = "✅ Выполнение успешно!"
-                    if result then
-                        output_box.Text = output_box.Text .. "\nРезультат: " .. tostring(result)
-                    end
-                else
-                    output_box.Text = "❌ Ошибка: " .. tostring(result)
+    end)
+    
+    load_execute_btn.MouseButton1Click:Connect(function()
+        if loaded_code and loaded_code ~= "" then
+            load_output.Text = "⏳ Выполнение загруженного скрипта..."
+            local success, result = execute_lua(loaded_code)
+            if success then
+                load_output.Text = "✅ Скрипт выполнен успешно!"
+                if result then
+                    load_output.Text = load_output.Text .. "\n📊 Результат: " .. tostring(result)
                 end
+            else
+                load_output.Text = "❌ Ошибка выполнения: " .. tostring(result)
             end
-        end)
-        
-        clear_btn.MouseButton1Click:Connect(function()
-            code_box.Text = ""
-            output_box.Text = ""
-        end)
-        
-        -- Вкладка 2: Память
-        local memory_tab = Instance.new("Frame")
-        memory_tab.Size = UDim2.new(1, 0, 1, -90)
-        memory_tab.Position = UDim2.new(0, 0, 0, 90)
-        memory_tab.BackgroundTransparency = 1
-        memory_tab.Visible = false
-        
-        local address_box = Instance.new("TextBox")
-        address_box.Size = UDim2.new(0.3, 0, 0, 30)
-        address_box.Position = UDim2.new(0.05, 0, 0, 0)
-        address_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        address_box.TextColor3 = Color3.fromRGB(255, 255, 255)
-        address_box.PlaceholderText = "Адрес"
-        address_box.Font = Enum.Font.SourceSans
-        address_box.TextSize = 14
-        
-        local size_box = Instance.new("TextBox")
-        size_box.Size = UDim2.new(0.15, 0, 0, 30)
-        size_box.Position = UDim2.new(0.38, 0, 0, 0)
-        size_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        size_box.TextColor3 = Color3.fromRGB(255, 255, 255)
-        size_box.PlaceholderText = "Размер"
-        size_box.Font = Enum.Font.SourceSans
-        size_box.TextSize = 14
-        
-        local read_btn = Instance.new("TextButton")
-        read_btn.Size = UDim2.new(0.15, 0, 0, 30)
-        read_btn.Position = UDim2.new(0.56, 0, 0, 0)
-        read_btn.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
-        read_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        read_btn.Text = "Читать"
-        read_btn.Font = Enum.Font.SourceSansBold
-        read_btn.TextSize = 14
-        
-        local write_box = Instance.new("TextBox")
-        write_box.Size = UDim2.new(0.3, 0, 0, 30)
-        write_box.Position = UDim2.new(0.05, 0, 0.1, 0)
-        write_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        write_box.TextColor3 = Color3.fromRGB(255, 255, 255)
-        write_box.PlaceholderText = "Данные для записи"
-        write_box.Font = Enum.Font.SourceSans
-        write_box.TextSize = 14
-        
-        local write_btn = Instance.new("TextButton")
-        write_btn.Size = UDim2.new(0.15, 0, 0, 30)
-        write_btn.Position = UDim2.new(0.38, 0, 0.1, 0)
-        write_btn.BackgroundColor3 = Color3.fromRGB(200, 100, 0)
-        write_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        write_btn.Text = "Записать"
-        write_btn.Font = Enum.Font.SourceSansBold
-        write_btn.TextSize = 14
-        
-        local mem_output = Instance.new("TextBox")
-        mem_output.Size = UDim2.new(0.9, 0, 0, 300)
-        mem_output.Position = UDim2.new(0.05, 0, 0.2, 0)
-        mem_output.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        mem_output.TextColor3 = Color3.fromRGB(200, 200, 200)
-        mem_output.PlaceholderText = "Результат..."
-        mem_output.TextWrapped = true
-        mem_output.MultiLine = true
-        mem_output.ReadOnly = true
-        mem_output.Font = Enum.Font.SourceSans
-        mem_output.TextSize = 12
-        
-        -- Вкладка 3: Процессы
-        local processes_tab = Instance.new("Frame")
-        processes_tab.Size = UDim2.new(1, 0, 1, -90)
-        processes_tab.Position = UDim2.new(0, 0, 0, 90)
-        processes_tab.BackgroundTransparency = 1
-        processes_tab.Visible = false
-        
-        local process_list = Instance.new("ScrollingFrame")
-        process_list.Size = UDim2.new(0.9, 0, 0, 350)
-        process_list.Position = UDim2.new(0.05, 0, 0, 0)
-        process_list.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        process_list.BackgroundTransparency = 0.5
-        process_list.BorderSizePixel = 0
-        
-        local refresh_btn = Instance.new("TextButton")
-        refresh_btn.Size = UDim2.new(0.15, 0, 0, 30)
-        refresh_btn.Position = UDim2.new(0.05, 0, 0.8, 0)
-        refresh_btn.BackgroundColor3 = Color3.fromRGB(0, 150, 150)
-        refresh_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        refresh_btn.Text = "Обновить"
-        refresh_btn.Font = Enum.Font.SourceSansBold
-        refresh_btn.TextSize = 14
-        
-        -- Вкладка 4: Настройки
-        local settings_tab = Instance.new("Frame")
-        settings_tab.Size = UDim2.new(1, 0, 1, -90)
-        settings_tab.Position = UDim2.new(0, 0, 0, 90)
-        settings_tab.BackgroundTransparency = 1
-        settings_tab.Visible = false
-        
-        local settings_label = Instance.new("TextLabel")
-        settings_label.Size = UDim2.new(1, 0, 0, 30)
-        settings_label.Position = UDim2.new(0, 0, 0, 0)
-        settings_label.Text = "Настройки (Все функции разблокированы)"
-        settings_label.TextColor3 = Color3.fromRGB(255, 255, 255)
-        settings_label.BackgroundTransparency = 1
-        settings_label.Font = Enum.Font.SourceSansBold
-        settings_label.TextSize = 18
-        
-        -- Кнопка закрытия
-        local close_btn = Instance.new("TextButton")
-        close_btn.Size = UDim2.new(0, 35, 0, 35)
-        close_btn.Position = UDim2.new(1, -40, 0, 5)
-        close_btn.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
-        close_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        close_btn.Text = "X"
-        close_btn.Font = Enum.Font.SourceSansBold
-        close_btn.TextSize = 20
-        
-        close_btn.MouseButton1Click:Connect(function()
-            gui:Destroy()
-        end)
-        
-        -- Перетаскивание
-        local dragging = false
-        local drag_start_x, drag_start_y
-        local frame_pos_x, frame_pos_y
-        
-        frame.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 then
-                dragging = true
-                drag_start_x = input.Position.X
-                drag_start_y = input.Position.Y
-                frame_pos_x = frame.Position.X.Offset
-                frame_pos_y = frame.Position.Y.Offset
-            end
-        end)
-        
-        frame.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 then
-                dragging = false
-            end
-        end)
-        
-        game:GetService("UserInputService").InputChanged:Connect(function(input)
-            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-                local dx = input.Position.X - drag_start_x
-                local dy = input.Position.Y - drag_start_y
-                frame.Position = UDim2.new(0.5, frame_pos_x + dx, 0.5, frame_pos_y + dy)
-            end
-        end)
-        
-        -- Сборка GUI
-        settings_label.Parent = settings_tab
-        
-        refresh_btn.Parent = processes_tab
-        process_list.Parent = processes_tab
-        
-        mem_output.Parent = memory_tab
-        write_btn.Parent = memory_tab
-        write_box.Parent = memory_tab
-        read_btn.Parent = memory_tab
-        size_box.Parent = memory_tab
-        address_box.Parent = memory_tab
-        
-        clear_btn.Parent = execute_tab
-        execute_btn.Parent = execute_tab
-        output_box.Parent = execute_tab
-        code_box.Parent = execute_tab
-        
-        tab_containers = {execute_tab, memory_tab, processes_tab, settings_tab}
-        for _, container in ipairs(tab_containers) do
-            container.Parent = frame
         end
-        
-        tab_frame.Parent = frame
-        title.Parent = frame
-        close_btn.Parent = frame
-        
-        frame.Parent = gui
-        gui.Parent = game:GetService("CoreGui")
-        
-        -- Активируем первую вкладку
-        tab_buttons[1].BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+    end)
+    
+    -- ВКЛАДКА 3: Память (заглушка)
+    local memory_tab = Instance.new("Frame")
+    memory_tab.Size = UDim2.new(1, 0, 1, -90)
+    memory_tab.Position = UDim2.new(0, 0, 0, 90)
+    memory_tab.BackgroundTransparency = 1
+    memory_tab.Visible = false
+    
+    local mem_label = Instance.new("TextLabel")
+    mem_label.Size = UDim2.new(1, 0, 0, 50)
+    mem_label.Position = UDim2.new(0, 0, 0, 20)
+    mem_label.Text = "🔧 Функции работы с памятью (в разработке)"
+    mem_label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    mem_label.BackgroundTransparency = 1
+    mem_label.Font = Enum.Font.SourceSansBold
+    mem_label.TextSize = 18
+    
+    -- ВКЛАДКА 4: Настройки
+    local settings_tab = Instance.new("Frame")
+    settings_tab.Size = UDim2.new(1, 0, 1, -90)
+    settings_tab.Position = UDim2.new(0, 0, 0, 90)
+    settings_tab.BackgroundTransparency = 1
+    settings_tab.Visible = false
+    
+    local settings_label = Instance.new("TextLabel")
+    settings_label.Size = UDim2.new(1, 0, 0, 50)
+    settings_label.Position = UDim2.new(0, 0, 0, 20)
+    settings_label.Text = "⭐ Все премиум-функции разблокированы!"
+    settings_label.TextColor3 = Color3.fromRGB(0, 255, 0)
+    settings_label.BackgroundTransparency = 1
+    settings_label.Font = Enum.Font.SourceSansBold
+    settings_label.TextSize = 22
+    
+    local info_label = Instance.new("TextLabel")
+    info_label.Size = UDim2.new(1, 0, 0, 100)
+    info_label.Position = UDim2.new(0, 0, 0, 80)
+    info_label.Text = "🟢 Статус: Premium\n✅ Все функции доступны\n🔓 Нет ограничений\n📦 Поддержка загрузки скриптов из интернета"
+    info_label.TextColor3 = Color3.fromRGB(200, 200, 200)
+    info_label.BackgroundTransparency = 1
+    info_label.Font = Enum.Font.SourceSans
+    info_label.TextSize = 16
+    info_label.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- Перетаскивание окна
+    local dragging = false
+    local drag_start_x, drag_start_y
+    local frame_pos_x, frame_pos_y
+    
+    title.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            drag_start_x = input.Position.X
+            drag_start_y = input.Position.Y
+            frame_pos_x = frame.Position.X.Offset
+            frame_pos_y = frame.Position.Y.Offset
+        end
+    end)
+    
+    title.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+    
+    game:GetService("UserInputService").InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local dx = input.Position.X - drag_start_x
+            local dy = input.Position.Y - drag_start_y
+            frame.Position = UDim2.new(0.5, frame_pos_x + dx, 0.5, frame_pos_y + dy)
+        end
+    end)
+    
+    -- Сборка GUI
+    settings_label.Parent = settings_tab
+    info_label.Parent = settings_tab
+    
+    mem_label.Parent = memory_tab
+    
+    load_execute_btn.Parent = load_tab
+    load_output.Parent = load_tab
+    load_btn.Parent = load_tab
+    url_box.Parent = load_tab
+    
+    clear_btn.Parent = execute_tab
+    execute_btn.Parent = execute_tab
+    output_box.Parent = execute_tab
+    code_box.Parent = execute_tab
+    
+    tab_containers = {execute_tab, load_tab, memory_tab, settings_tab}
+    for _, container in ipairs(tab_containers) do
+        container.Parent = frame
     end
     
-    -- Запуск GUI
-    pcall(create_gui)
+    tab_frame.Parent = frame
+    title.Parent = frame
+    close_btn.Parent = frame
     
-    print("✅ Скрипт успешно загружен!")
-    print("⭐ Все премиум-функции разблокированы")
-    print("📋 Для использования введите код в поле и нажмите 'Выполнить'")
+    frame.Parent = gui
+    gui.Parent = game:GetService("CoreGui")
+    
+    print("✅ Скрипт загружен! Все функции доступны бесплатно.")
+    print("📌 Используйте вкладку 'Загрузка' для загрузки скриптов из интернета")
 end
 
--- Запуск основного скрипта
+-- Запуск с обработкой ошибок
 local success, err = pcall(main_script)
 if not success then
-    print("❌ Ошибка загрузки: " .. tostring(err))
+    print("❌ Ошибка: " .. tostring(err))
+    -- Если GUI не создался, используем консольную версию
+    print("📌 Используйте консольную версию:")
+    print('loadstring(game:HttpGet("https://raw.githubusercontent.com/OBSIGE/fgswfgs/refs/heads/main"))()')
 end
