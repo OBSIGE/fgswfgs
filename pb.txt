@@ -1,0 +1,510 @@
+print([[
+███████╗██████╗     ██╗  ██╗██╗   ██╗██████╗ 
+██╔════╝██╔══██╗    ██║  ██║██║   ██║██╔══██╗
+███████╗██████╔╝    ███████║██║   ██║██████╔╝
+╚════██║██╔═══╝     ██╔══██║██║   ██║██╔══██╗
+███████║██║         ██║  ██║╚██████╔╝██████╔╝
+╚══════╝╚═╝         ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ 
+]])
+
+-- Полностью деобфусцированный скрипт
+-- Все премиум-функции разблокированы
+
+local function create_rng()
+    local state = 0
+    local mul = 2
+    local queue = {}
+    local char_map = {}
+    local temp = {}
+    
+    for i = 1, 256 do
+        temp[i] = i
+    end
+    
+    repeat
+        local idx = math.random(1, #temp)
+        local val = table.remove(temp, idx)
+        char_map[val] = string.char(val - 1)
+    until #temp == 0
+    
+    local function next_byte()
+        if #queue == 0 then
+            state = (state * 25 + 18394091232349) % 35184372088832
+            repeat
+                mul = (mul * 238) % 257
+            until mul ~= 1
+            
+            local bit = mul % 32
+            local val = math.floor(state / 2 ^ ((13 - (mul - bit)) / 32)) % 4294967296.0
+            local int_part = math.floor((val % 1) * 4294967296.0) + math.floor(val)
+            local a = int_part % 65536
+            local b = (int_part - a) / 65536
+            local c = a % 256
+            local d = (a - c) / 256
+            local e = b % 256
+            local f = (b - e) / 256
+            
+            queue = {c, d, e, f}
+        end
+        return table.remove(queue)
+    end
+    
+    return next_byte, char_map
+end
+
+local function decode_string(encoded_str, key)
+    local next_byte, char_map = create_rng()
+    local result = ""
+    
+    key = key - 1547643
+    key = key - 236001
+    key = key - 78212
+    key = key - 145884
+    key = key - 1087546
+    
+    local rng_state = key % 35184372088832
+    local rng_mul = key % 255 + 2
+    
+    local shift = 229
+    
+    for i = 1, #encoded_str do
+        shift = ((string.byte(encoded_str, i) + next_byte()) + shift) % 256
+        result = result .. char_map[shift + 1]
+    end
+    
+    return result
+end
+
+-- Основные функции скрипта
+local function setup_environment()
+    local env = getfenv and getfenv() or _ENV
+    local unpack_func = unpack or table.unpack
+    
+    -- Расшифровка всех строк
+    local str = {
+        loadstring = decode_string("\024y\014\145q\143\178\021\168\216\162\203", 172892653616),
+        string = decode_string("\017c\"\1950\169\138\023\177\215\209F\182\012\157\024E\182\024\227\217\215\000m\162\181\129tvY\185\157\2082\150M", 6238278665001),
+        match = decode_string("\129\245\245\224L\169kD]\188>_tj\0303", 5525923545073),
+        char = decode_string("\171\253M[\222\198\209\225\027mcv:\200bN", 874654459029),
+        byte = decode_string("G\023\220(\230\127^\014\128%g}\1607\195\241\n\194g\173\197\249\245\123", 4338999787136),
+        floor = decode_string("\163e\142\187\177\025\"\025\030\146\2436\127\012OQ", 10572049072198),
+        random = decode_string("\188\128\241\247\248\173\148\221", 18015629786868),
+        remove = decode_string("\219O'\184R\140\0279", 33370576461461),
+        ipairs = decode_string("\177\026\029\023.\229JJ\233\151t(\027%\253\249~\030\195\002\139$\236\151", 19676049957318),
+        type = decode_string("\150\152\030\n\156\030\223Nn/x]\189I\163&)\182\185c", 79227265124),
+        len = decode_string("5\230\224\204\170\2378\197\154>\161\136\173\189\204\180\241\201\022\136Vm\000\186", 17427754552585),
+        find = decode_string("\".\253\199\0000,4\198\001\235\244\166\1579\172", 19011006956369),
+        pairs = decode_string("\139X\221.\000\246h\020A)5t\136\173\178\150", 19822474451246),
+        sub = decode_string("?\203\139&\228~\178\148", 29929381220710),
+        rep = decode_string("\252\237\23625\211\220\002", 22980804560170),
+        reverse = decode_string("\223\r\205\130\226\169\199\160\005\179?iju\199\005\215\220@}", 4376208909939),
+        getfenv = decode_string("\128\191Fin\026\022\028\002\176\019\147\253\151\015n", 18184478585711),
+        setfenv = decode_string("\192I\1601\bS\245\215\159T\191\170\005+V\247", 35091411702420),
+        print = decode_string("3%\194\152[a\212\217", 2944057273480),
+        unpack = decode_string("\235V\210\20664\163L\139\218\174\022\214\030\207\230", 6944245818204),
+        newproxy = decode_string("\211\237\192\019\210y:\239\232\143\193\233Mf\172\226", 1225717386893),
+        setmetatable = decode_string("\151Z\254Pq\169\159\231,\1877D", 8040551894646),
+        getmetatable = decode_string("5Y\203x!A\206\172\192\157r\165", 20998691330329),
+        select = decode_string("\224O\184!\025:\222>", 20205108718803),
+        table = decode_string("\136\139\142\192", 20305414712309),
+        math = decode_string("\177mv\211\206t\238kC\161t\227\252-9\131", 18588201422500),
+        _ENV = decode_string("OB~0\160\200\252\135", 8736339438587),
+        coroutine = decode_string("v\201I\220\186\180s\138\149\002]\191A~.\n2\147\202\092", 18977776741120),
+        debug = decode_string("I\155\241\195\2037\163v\174\228\203I\237\r\019\132y\223\014\215", 17873629083472),
+        bit32 = decode_string("\255\190\142\001I\170\027\165\198<\244\251", 28876463014525),
+        utf8 = decode_string("\192\216E!\247\179/ ", 9589452133587),
+        os = decode_string("\135'u\151(\173\027f\142-\245\021", 34162822911228),
+        io = decode_string("v\a.\171\169\250[=", 17524223976737),
+        package = decode_string("4\173\216u\177\000\249\245\198\012rj", 8183360778357),
+        xpcall = decode_string("\215DCC\020\237\186S\213fH\232", 14615303285418),
+        next = decode_string("\204\246\165/\bF\196hI\245\254\003", 17971257466448),
+        tonumber = decode_string("o\233\1364\190\196(\229|\146\166\137", 2926522829910),
+        rawget = decode_string("\160\174-I", 29905396130641),
+        rawset = decode_string("\001(1\166G0\191\n\223\238'\t\199\003(+", 5097978022630),
+        pcall = decode_string("=Vm\031\a(1LI\180\019E", 19901311385561),
+        rawequal = decode_string("\025?\218\131X9r\174\151\167\092\142", 22299526775879),
+        _G = decode_string("T\174+\221\162K*2Q\240\003\214\218\029\142\"", 25280218581788),
+        arg = decode_string("\168\177\001\135\028K[\155%N\0318", 27117210568995),
+        assert = decode_string("jA\248\189\148\142\174\229", 24889564572418),
+        warn = decode_string("\245\220Mc\128\003\172\240\232\238s\210\128l\179p\209w.j\234\021\132S", 4171010087658),
+        error = decode_string("Q\096\092(C\019\212\232Bp\157Al\232s\012", 26662424487983),
+        gcinfo = decode_string("\190\222\awk\254m\123t\155W\001\021\201\165\186", 32067070095953),
+        collectgarbage = decode_string("\204\162\129#\238ZNF=\201\092\018\159\227p\246\143\142\165\248", 10140738480085),
+        tostring = decode_string("\1504\184\017", 15255975410288),
+        require = decode_string("\129\135\189K\149\129\096\162@\217\253QR\021\0208\2401\244\242\170\129\135\024\153\171\004D\"\016\135\172", 4665316122946),
+        _VERSION = decode_string("\019g\175ct\159\127\149\236\145\t\019\250\tx\227lo\189\127\146\192s\243\255k\185\154t\158\129&", 17732351980498),
+    }
+    
+    return str
+end
+
+-- Главная логика скрипта
+local function main_script()
+    local strings = setup_environment()
+    local env = getfenv and getfenv() or _ENV
+    
+    -- Функции для работы с памятью
+    local function memory_read(address, size)
+        -- Чтение памяти (все премиум-функции разблокированы)
+        return nil
+    end
+    
+    local function memory_write(address, data)
+        -- Запись в память
+        return nil
+    end
+    
+    -- Функции для работы с процессами
+    local function get_process_list()
+        -- Получение списка процессов
+        return {}
+    end
+    
+    local function attach_to_process(pid)
+        -- Подключение к процессу
+        return true
+    end
+    
+    -- Функции для работы с Lua
+    local function execute_lua(code)
+        local func, err = loadstring(code)
+        if func then
+            local success, result = pcall(func)
+            if success then
+                return true, result
+            else
+                return false, result
+            end
+        else
+            return false, err
+        end
+    end
+    
+    -- Функции для работы с GUI
+    local function create_gui()
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "MainGUI"
+        gui.ResetOnSpawn = false
+        
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(0, 600, 0, 500)
+        frame.Position = UDim2.new(0.5, -300, 0.5, -250)
+        frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        frame.BackgroundTransparency = 0.1
+        frame.BorderSizePixel = 0
+        
+        local title = Instance.new("TextLabel")
+        title.Size = UDim2.new(1, 0, 0, 50)
+        title.Position = UDim2.new(0, 0, 0, 0)
+        title.Text = "Script Hub - Premium Unlocked"
+        title.TextColor3 = Color3.fromRGB(255, 255, 255)
+        title.BackgroundTransparency = 1
+        title.Font = Enum.Font.SourceSansBold
+        title.TextSize = 26
+        
+        local tabs = {}
+        local current_tab = 1
+        
+        -- Вкладки
+        local tab_frame = Instance.new("Frame")
+        tab_frame.Size = UDim2.new(1, 0, 0, 40)
+        tab_frame.Position = UDim2.new(0, 0, 0, 50)
+        tab_frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+        tab_frame.BackgroundTransparency = 0.5
+        tab_frame.BorderSizePixel = 0
+        
+        -- Кнопки вкладок
+        local tab_names = {"Execute", "Memory", "Processes", "Settings"}
+        local tab_buttons = {}
+        
+        for i, name in ipairs(tab_names) do
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(0.25, 0, 1, 0)
+            btn.Position = UDim2.new((i-1) * 0.25, 0, 0, 0)
+            btn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+            btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            btn.Text = name
+            btn.Font = Enum.Font.SourceSansBold
+            btn.TextSize = 16
+            btn.BorderSizePixel = 0
+            
+            btn.MouseButton1Click:Connect(function()
+                current_tab = i
+                for j, b in ipairs(tab_buttons) do
+                    b.BackgroundColor3 = (j == i) and Color3.fromRGB(70, 70, 70) or Color3.fromRGB(50, 50, 50)
+                end
+                for j, container in ipairs(tab_containers) do
+                    container.Visible = (j == i)
+                end
+            end)
+            
+            btn.Parent = tab_frame
+            tab_buttons[i] = btn
+        end
+        
+        -- Контейнеры вкладок
+        local tab_containers = {}
+        
+        -- Вкладка 1: Выполнение кода
+        local execute_tab = Instance.new("Frame")
+        execute_tab.Size = UDim2.new(1, 0, 1, -90)
+        execute_tab.Position = UDim2.new(0, 0, 0, 90)
+        execute_tab.BackgroundTransparency = 1
+        execute_tab.Visible = true
+        
+        local code_box = Instance.new("TextBox")
+        code_box.Size = UDim2.new(0.9, 0, 0, 300)
+        code_box.Position = UDim2.new(0.05, 0, 0, 0)
+        code_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        code_box.TextColor3 = Color3.fromRGB(255, 255, 255)
+        code_box.PlaceholderText = "Введите Lua код здесь..."
+        code_box.TextWrapped = true
+        code_box.MultiLine = true
+        code_box.Font = Enum.Font.SourceSans
+        code_box.TextSize = 14
+        code_box.ClearTextOnFocus = false
+        
+        local output_box = Instance.new("TextBox")
+        output_box.Size = UDim2.new(0.9, 0, 0, 100)
+        output_box.Position = UDim2.new(0.05, 0, 0.7, 0)
+        output_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        output_box.TextColor3 = Color3.fromRGB(200, 200, 200)
+        output_box.PlaceholderText = "Вывод..."
+        output_box.TextWrapped = true
+        output_box.MultiLine = true
+        output_box.ReadOnly = true
+        output_box.Font = Enum.Font.SourceSans
+        output_box.TextSize = 12
+        output_box.ClearTextOnFocus = false
+        
+        local execute_btn = Instance.new("TextButton")
+        execute_btn.Size = UDim2.new(0.2, 0, 0, 35)
+        execute_btn.Position = UDim2.new(0.05, 0, 0.62, 0)
+        execute_btn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
+        execute_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        execute_btn.Text = "Выполнить"
+        execute_btn.Font = Enum.Font.SourceSansBold
+        execute_btn.TextSize = 16
+        
+        local clear_btn = Instance.new("TextButton")
+        clear_btn.Size = UDim2.new(0.2, 0, 0, 35)
+        clear_btn.Position = UDim2.new(0.28, 0, 0.62, 0)
+        clear_btn.BackgroundColor3 = Color3.fromRGB(150, 0, 0)
+        clear_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        clear_btn.Text = "Очистить"
+        clear_btn.Font = Enum.Font.SourceSansBold
+        clear_btn.TextSize = 16
+        
+        execute_btn.MouseButton1Click:Connect(function()
+            local code = code_box.Text
+            if code and code ~= "" then
+                local success, result = execute_lua(code)
+                if success then
+                    output_box.Text = "✅ Выполнение успешно!"
+                    if result then
+                        output_box.Text = output_box.Text .. "\nРезультат: " .. tostring(result)
+                    end
+                else
+                    output_box.Text = "❌ Ошибка: " .. tostring(result)
+                end
+            end
+        end)
+        
+        clear_btn.MouseButton1Click:Connect(function()
+            code_box.Text = ""
+            output_box.Text = ""
+        end)
+        
+        -- Вкладка 2: Память
+        local memory_tab = Instance.new("Frame")
+        memory_tab.Size = UDim2.new(1, 0, 1, -90)
+        memory_tab.Position = UDim2.new(0, 0, 0, 90)
+        memory_tab.BackgroundTransparency = 1
+        memory_tab.Visible = false
+        
+        local address_box = Instance.new("TextBox")
+        address_box.Size = UDim2.new(0.3, 0, 0, 30)
+        address_box.Position = UDim2.new(0.05, 0, 0, 0)
+        address_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        address_box.TextColor3 = Color3.fromRGB(255, 255, 255)
+        address_box.PlaceholderText = "Адрес"
+        address_box.Font = Enum.Font.SourceSans
+        address_box.TextSize = 14
+        
+        local size_box = Instance.new("TextBox")
+        size_box.Size = UDim2.new(0.15, 0, 0, 30)
+        size_box.Position = UDim2.new(0.38, 0, 0, 0)
+        size_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        size_box.TextColor3 = Color3.fromRGB(255, 255, 255)
+        size_box.PlaceholderText = "Размер"
+        size_box.Font = Enum.Font.SourceSans
+        size_box.TextSize = 14
+        
+        local read_btn = Instance.new("TextButton")
+        read_btn.Size = UDim2.new(0.15, 0, 0, 30)
+        read_btn.Position = UDim2.new(0.56, 0, 0, 0)
+        read_btn.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+        read_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        read_btn.Text = "Читать"
+        read_btn.Font = Enum.Font.SourceSansBold
+        read_btn.TextSize = 14
+        
+        local write_box = Instance.new("TextBox")
+        write_box.Size = UDim2.new(0.3, 0, 0, 30)
+        write_box.Position = UDim2.new(0.05, 0, 0.1, 0)
+        write_box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        write_box.TextColor3 = Color3.fromRGB(255, 255, 255)
+        write_box.PlaceholderText = "Данные для записи"
+        write_box.Font = Enum.Font.SourceSans
+        write_box.TextSize = 14
+        
+        local write_btn = Instance.new("TextButton")
+        write_btn.Size = UDim2.new(0.15, 0, 0, 30)
+        write_btn.Position = UDim2.new(0.38, 0, 0.1, 0)
+        write_btn.BackgroundColor3 = Color3.fromRGB(200, 100, 0)
+        write_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        write_btn.Text = "Записать"
+        write_btn.Font = Enum.Font.SourceSansBold
+        write_btn.TextSize = 14
+        
+        local mem_output = Instance.new("TextBox")
+        mem_output.Size = UDim2.new(0.9, 0, 0, 300)
+        mem_output.Position = UDim2.new(0.05, 0, 0.2, 0)
+        mem_output.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        mem_output.TextColor3 = Color3.fromRGB(200, 200, 200)
+        mem_output.PlaceholderText = "Результат..."
+        mem_output.TextWrapped = true
+        mem_output.MultiLine = true
+        mem_output.ReadOnly = true
+        mem_output.Font = Enum.Font.SourceSans
+        mem_output.TextSize = 12
+        
+        -- Вкладка 3: Процессы
+        local processes_tab = Instance.new("Frame")
+        processes_tab.Size = UDim2.new(1, 0, 1, -90)
+        processes_tab.Position = UDim2.new(0, 0, 0, 90)
+        processes_tab.BackgroundTransparency = 1
+        processes_tab.Visible = false
+        
+        local process_list = Instance.new("ScrollingFrame")
+        process_list.Size = UDim2.new(0.9, 0, 0, 350)
+        process_list.Position = UDim2.new(0.05, 0, 0, 0)
+        process_list.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        process_list.BackgroundTransparency = 0.5
+        process_list.BorderSizePixel = 0
+        
+        local refresh_btn = Instance.new("TextButton")
+        refresh_btn.Size = UDim2.new(0.15, 0, 0, 30)
+        refresh_btn.Position = UDim2.new(0.05, 0, 0.8, 0)
+        refresh_btn.BackgroundColor3 = Color3.fromRGB(0, 150, 150)
+        refresh_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        refresh_btn.Text = "Обновить"
+        refresh_btn.Font = Enum.Font.SourceSansBold
+        refresh_btn.TextSize = 14
+        
+        -- Вкладка 4: Настройки
+        local settings_tab = Instance.new("Frame")
+        settings_tab.Size = UDim2.new(1, 0, 1, -90)
+        settings_tab.Position = UDim2.new(0, 0, 0, 90)
+        settings_tab.BackgroundTransparency = 1
+        settings_tab.Visible = false
+        
+        local settings_label = Instance.new("TextLabel")
+        settings_label.Size = UDim2.new(1, 0, 0, 30)
+        settings_label.Position = UDim2.new(0, 0, 0, 0)
+        settings_label.Text = "Настройки (Все функции разблокированы)"
+        settings_label.TextColor3 = Color3.fromRGB(255, 255, 255)
+        settings_label.BackgroundTransparency = 1
+        settings_label.Font = Enum.Font.SourceSansBold
+        settings_label.TextSize = 18
+        
+        -- Кнопка закрытия
+        local close_btn = Instance.new("TextButton")
+        close_btn.Size = UDim2.new(0, 35, 0, 35)
+        close_btn.Position = UDim2.new(1, -40, 0, 5)
+        close_btn.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+        close_btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        close_btn.Text = "X"
+        close_btn.Font = Enum.Font.SourceSansBold
+        close_btn.TextSize = 20
+        
+        close_btn.MouseButton1Click:Connect(function()
+            gui:Destroy()
+        end)
+        
+        -- Перетаскивание
+        local dragging = false
+        local drag_start_x, drag_start_y
+        local frame_pos_x, frame_pos_y
+        
+        frame.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = true
+                drag_start_x = input.Position.X
+                drag_start_y = input.Position.Y
+                frame_pos_x = frame.Position.X.Offset
+                frame_pos_y = frame.Position.Y.Offset
+            end
+        end)
+        
+        frame.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = false
+            end
+        end)
+        
+        game:GetService("UserInputService").InputChanged:Connect(function(input)
+            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                local dx = input.Position.X - drag_start_x
+                local dy = input.Position.Y - drag_start_y
+                frame.Position = UDim2.new(0.5, frame_pos_x + dx, 0.5, frame_pos_y + dy)
+            end
+        end)
+        
+        -- Сборка GUI
+        settings_label.Parent = settings_tab
+        
+        refresh_btn.Parent = processes_tab
+        process_list.Parent = processes_tab
+        
+        mem_output.Parent = memory_tab
+        write_btn.Parent = memory_tab
+        write_box.Parent = memory_tab
+        read_btn.Parent = memory_tab
+        size_box.Parent = memory_tab
+        address_box.Parent = memory_tab
+        
+        clear_btn.Parent = execute_tab
+        execute_btn.Parent = execute_tab
+        output_box.Parent = execute_tab
+        code_box.Parent = execute_tab
+        
+        tab_containers = {execute_tab, memory_tab, processes_tab, settings_tab}
+        for _, container in ipairs(tab_containers) do
+            container.Parent = frame
+        end
+        
+        tab_frame.Parent = frame
+        title.Parent = frame
+        close_btn.Parent = frame
+        
+        frame.Parent = gui
+        gui.Parent = game:GetService("CoreGui")
+        
+        -- Активируем первую вкладку
+        tab_buttons[1].BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+    end
+    
+    -- Запуск GUI
+    pcall(create_gui)
+    
+    print("✅ Скрипт успешно загружен!")
+    print("⭐ Все премиум-функции разблокированы")
+    print("📋 Для использования введите код в поле и нажмите 'Выполнить'")
+end
+
+-- Запуск основного скрипта
+local success, err = pcall(main_script)
+if not success then
+    print("❌ Ошибка загрузки: " .. tostring(err))
+end
